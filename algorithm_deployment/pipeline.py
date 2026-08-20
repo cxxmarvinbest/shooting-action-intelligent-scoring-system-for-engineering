@@ -28,7 +28,12 @@ from tracker.target_selector import TargetSelector
 from pose_estimate.pose_model import RKNNPoseModel
 from pose_estimate.pose_feature import SKELETON_CONNECTIONS, extract_pose_features
 
+
 # RTSP 流硬解（RK3588 mpp）接入时取消下面注释：
+# import sys
+# script_dir = os.path.dirname(os.path.abspath(__file__))
+# mpp_lib_path = os.path.abspath(os.path.join(script_dir, "../mpp"))
+# sys.path.append(mpp_lib_path)
 # import time
 # import threading
 # import mpp_player
@@ -110,7 +115,7 @@ class VideoAnalyzer:
     #         player.stop()
     #         player.close()
 
-    def process_video(self, video_path, save_visuals=False, out_dir=None):
+    def process_video(self, video_path, save_visuals=True, out_dir=None):
         """
         处理单个视频：描黑边预处理 + 检测 + 姿态 + 特征提取 + 动作分段（可选可视化）。
 
@@ -189,7 +194,12 @@ class VideoAnalyzer:
         if not seq2:
             seq2 = [[180.0, 180.0, 180.0, 180.0], [180.0, 180.0, 180.0, 180.0]]
 
-        valid_height_frames = [m for m in frame_metrics if 'wrist_y' in m and 'player_h' in m]
+        # 注意：'wrist_y' in m 只判断 key 是否存在，但 extract_pose_features
+        # 在未检测到人时仍会写入 key（值为 None），必须用 is not None 过滤，
+        # 否则 min() 会把 None 喂进去导致 '<'/'>' not supported ... NoneType 报错
+        valid_height_frames = [m for m in frame_metrics
+                               if m.get('wrist_y') is not None
+                               and m.get('player_h') is not None]
         if valid_height_frames:
             start_wrist_y = valid_height_frames[0]['wrist_y']
             min_wrist_y = min(m['wrist_y'] for m in valid_height_frames)
