@@ -9,8 +9,6 @@
   4. 检测/姿态推理阈值
 
 说明：
-  - 所有路径均为 RK3588 盒子（Linux, 用户 linaro）上的路径，
-    Windows 本地验证时通过环境变量或修改本文件切换。
   - 标准视频为 544x960 竖屏；RTSP 摄像头视频为 1920x1080 横屏。
 """
 
@@ -32,7 +30,7 @@ class Config:
         "LQ_STD_DIR", "/home/linaro/code/intelligent_scoring_system/shot_clips/left_view")
     # 评分结果输出目录（分段视频 + 逐帧图）
     OUTPUT_DIR = os.environ.get(
-        "LQ_OUT_DIR", "/home/linaro/code/intelligent_scoring_system/learner_test_videos/left_rtsp_shot_clip")
+        "LQ_OUT_DIR", "/home/linaro/code/intelligent_scoring_system/outputs")
 
     # ================= 描黑边预处理参数 =================
     # 目标尺寸：与标准视频一致（宽 x 高）
@@ -59,3 +57,8 @@ class Config:
     OUT_VIDEO_W = 480          # 分段展示视频宽
     OUT_VIDEO_H = 640          # 分段展示视频高
     OUT_SLOW_FACTOR = 0.4      # 慢放倍率
+
+    # ================= 隔帧采样 =================
+    # 隔帧采样步长：2 表示每隔一帧分析一帧（检测+姿态+特征只做一次，速度约快一倍）。
+    # 输出图片/分段视频也按此步长隔帧写出；评分里的时长/角速度用 fps/FRAME_STRIDE 折算。
+    FRAME_STRIDE = int(os.environ.get("LQ_FRAME_STRIDE", "2"))

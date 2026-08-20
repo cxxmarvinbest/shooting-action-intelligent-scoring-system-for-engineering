@@ -17,6 +17,7 @@
 依赖：os / cv2 / numpy / config / tracker.* / pose_estimate.*
 """
 
+import logging
 import os
 import cv2
 import numpy as np
@@ -27,6 +28,8 @@ from tracker.det_model import RKNNDetModel
 from tracker.target_selector import TargetSelector
 from pose_estimate.pose_model import RKNNPoseModel
 from pose_estimate.pose_feature import SKELETON_CONNECTIONS, extract_pose_features
+
+logger = logging.getLogger("basketball_scoring")
 
 
 # RTSP 流硬解（RK3588 mpp）接入时取消下面注释：
@@ -51,6 +54,8 @@ class VideoAnalyzer:
 
     def load_models(self):
         """加载 RKNN 检测模型与姿态估计模型"""
+        logger.info("加载检测模型: %s", Config.DET_RKNN_PATH)
+        logger.info("加载姿态模型: %s", Config.POSE_RKNN_PATH)
         self.det_model = RKNNDetModel(
             Config.DET_RKNN_PATH,
             conf_thres=Config.DET_CONF_THRES,
@@ -131,16 +136,27 @@ class VideoAnalyzer:
             return None, None, None, None, None, None
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        self.current_fps = fps
+        stride = max(1, int(Config.FRAME_STRIDE))
+        # 隔帧采样后，相邻采样帧的时间间隔变为 stride/fps 秒；
+        # 评分里的时长、角速度都基于帧数×fps 计算，因此把有效帧率设为 fps/stride，保证口径不变。
+        self.current_fps = fps / stride
+
+        logger.info("处理视频: %s (fps=%.1f, 采样步长=%d)",
+                    os.path.basename(video_path), fps, stride)
 
         frame_metrics = []
         frame_idx = 0
 
         # 2. 逐帧：描黑边预处理 -> 检测 -> 姿态 -> 特征
+        #    隔帧采样：仅对 stride 的整数倍帧做检测/姿态/特征分析，其余帧直接跳过。
         while True:
             success, frame = cap.read()
             if not success:
                 break
+
+            if frame_idx % stride != 0:
+                frame_idx += 1
+                continue
 
             # 横屏摄像头视频 -> 中央竖幅裁剪 -> 544x960（标准视频原样通过）
             frame, _ = self.preprocessor.process(frame)
@@ -194,6 +210,9 @@ class VideoAnalyzer:
         if not seq2:
             seq2 = [[180.0, 180.0, 180.0, 180.0], [180.0, 180.0, 180.0, 180.0]]
 
+        logger.info("动作分段完成: 分界帧=%d, 阶段1=%d 帧, 阶段2=%d 帧",
+                    idx_squat, len(seq1), len(seq2))
+
         # 注意：'wrist_y' in m 只判断 key 是否存在，但 extract_pose_features
         # 在未检测到人时仍会写入 key（值为 None），必须用 is not None 过滤，
         # 否则 min() 会把 None 喂进去导致 '<'/'>' not supported ... NoneType 报错
@@ -211,20 +230,26 @@ class VideoAnalyzer:
         out1_path, out2_path = None, None
 
         if save_visuals and out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+            # 分段视频与逐帧图片分目录存放，避免混在一起
+            videos_dir = os.path.join(out_dir, "videos")
+            frames_dir = os.path.join(out_dir, "frames")
+            os.makedirs(videos_dir, exist_ok=True)
+            os.makedirs(frames_dir, exist_ok=True)
 
-            for file_name in os.listdir(out_dir):
-                if file_name.endswith('.jpg') or file_name.endswith('.mp4'):
+            # 清理旧的视频/帧图产物（只清理各自子目录，不影响报告/日志/JSON 等结果文件）
+            for d in (videos_dir, frames_dir):
+                for file_name in os.listdir(d):
                     try:
-                        os.remove(os.path.join(out_dir, file_name))
+                        os.remove(os.path.join(d, file_name))
                     except Exception:
                         pass
 
             # 6. 可视化输出（重新读一遍视频，叠加骨架/检测框后按分段写出）
+            #    同样隔帧写出；视频帧率按有效帧率缩放，保持慢放比例不变。
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            slow_fps = fps * Config.OUT_SLOW_FACTOR
-            out1_path = os.path.join(out_dir, "clip1_squat.mp4")
-            out2_path = os.path.join(out_dir, "clip2_release.mp4")
+            slow_fps = (fps / stride) * Config.OUT_SLOW_FACTOR
+            out1_path = os.path.join(videos_dir, "clip1_squat.mp4")
+            out2_path = os.path.join(videos_dir, "clip2_release.mp4")
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out1 = cv2.VideoWriter(out1_path, fourcc, slow_fps,
                                    (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
@@ -234,16 +259,21 @@ class VideoAnalyzer:
             skeleton_connections = SKELETON_CONNECTIONS
             width, height = Config.TARGET_W, Config.TARGET_H
 
-            curr_idx = 0
+            curr_idx = 0     # 原始帧序号（用于与 idx_squat 比较、命名图片）
+            sampled_idx = 0  # frame_metrics 中的采样序号（隔帧后两者不再相等）
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
 
+                if curr_idx % stride != 0:
+                    curr_idx += 1
+                    continue
+
                 # 与推理阶段保持完全一致的预处理，保证坐标对得上
                 frame, _ = self.preprocessor.process(frame)
 
-                data = frame_metrics[curr_idx] if curr_idx < len(frame_metrics) else None
+                data = frame_metrics[sampled_idx] if sampled_idx < len(frame_metrics) else None
                 if data is not None:
                     for bx in data.get('ball_boxes', []):
                         bx1, by1, bx2, by2 = bx
@@ -326,11 +356,14 @@ class VideoAnalyzer:
                 else:
                     out2.write(frame)
 
-                cv2.imwrite(os.path.join(out_dir, f"frame_{curr_idx:04d}.jpg"), frame)
+                cv2.imwrite(os.path.join(frames_dir, f"frame_{curr_idx:04d}.jpg"), frame)
                 curr_idx += 1
+                sampled_idx += 1
 
             out1.release()
             out2.release()
+            logger.info("可视化输出完成: 视频 -> %s / %s；帧图 -> %s 目录",
+                        out1_path, out2_path, frames_dir)
 
         cap.release()
         s1 = np.array(seq1)
