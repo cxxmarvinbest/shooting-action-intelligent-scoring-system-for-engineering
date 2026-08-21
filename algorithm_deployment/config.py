@@ -31,7 +31,7 @@ class Config:
         "LQ_STD_DIR", "/home/linaro/code/intelligent_scoring_system/shot_clips/left_view")
     # 评分结果输出目录（分段视频 + 逐帧图）
     OUTPUT_DIR = os.environ.get(
-        "LQ_OUT_DIR", "/home/linaro/code/intelligent_scoring_system/outputs")
+        "LQ_OUT_DIR", "/home/linaro/code/outputs")
     # 标准视频库特征缓存文件（冠军样本角度序列 + 平均出手高度，.npz）
     # 首次运行生成，之后每次评分直接读缓存，避免重复跑标准视频库推理。
     # 更换标准视频库或修改 FRAME_STRIDE 后，删除此文件重新生成。
@@ -69,14 +69,41 @@ class Config:
     # 输出图片/分段视频也按此步长隔帧写出；评分里的时长/角速度用 fps/FRAME_STRIDE 折算。
     FRAME_STRIDE = int(os.environ.get("LQ_FRAME_STRIDE", "2"))
 
+    # ================= 关键点环形缓存（多投篮切分）=================
+    # 环形队列预缓存帧数：出手事件触发后回退至少要能拿到的历史帧数。
+    RING_PRECACHE_FRAMES = int(os.environ.get("LQ_RING_PRECACHE", "35"))
+    # 环形缓存总容量（≥ 预缓存 + 最大动作窗口）。deque(maxlen) 滚动覆盖，天然防内存耗尽。
+    RING_MAX_FRAMES = int(os.environ.get("LQ_RING_MAX", "120"))
+    # 持球防抖：连续 N 帧判定为持球才确认（滤除单帧误检）。
+    HOLD_DEBOUNCE_FRAMES = int(os.environ.get("LQ_HOLD_DEBOUNCE", "3"))
+    # 持球超时：确认持球后 N 帧内未触发出手事件则放弃该候选，避免挂死在未闭合动作。
+    HOLD_TIMEOUT_FRAMES = int(os.environ.get("LQ_HOLD_TIMEOUT", "60"))
+    # 出手后回退的最大滑动窗口（反向回溯真实动作起点用），应 ≥ 预缓存。
+    LOOKBACK_WINDOW_FRAMES = int(os.environ.get("LQ_LOOKBACK_WINDOW", "90"))
+    # 手腕最高点（出手瞬间）检测窗口：在最近 N 帧 wrist_y 中找极小值拐点。
+    RELEASE_TRIGGER_WINDOW = int(os.environ.get("LQ_RELEASE_WINDOW", "5"))
+    # 持球判定：球框与球员框相交判定时，球员框外扩的像素余量（吸收检测框抖动）。
+    HOLD_IOU_MARGIN = int(os.environ.get("LQ_HOLD_IOU_MARGIN", "10"))
+    # 最短有效动作段长度（采样帧数）：段长过短视为误检，直接丢弃（不评分、不输出）。
+    MIN_SHOT_FRAMES = int(os.environ.get("LQ_MIN_SHOT_FRAMES", "10"))
+
+    # ================= H265 视频自动转码预处理 =================
+    # 摄像头自带录制通常产出 H265(HEVC)，且 RTSP 录制常缺 IDR 关键帧/moov，
+    # cv2 软解 H265 会报 "Could not find ref with POC" 导致打不开/花屏。
+    # 开启后：ffprobe 检测到 hevc 编码时，先用 ffmpeg 转码成 H264 临时文件再分析。
+    # 设 LQ_AUTO_TRANSCODE=0 可关闭（盒子无 ffmpeg 时）。
+    AUTO_TRANSCODE_H265 = bool(int(os.environ.get("LQ_AUTO_TRANSCODE", "1")))
+    FFMPEG_BIN = os.environ.get("LQ_FFMPEG", "ffmpeg")
+    FFPROBE_BIN = os.environ.get("LQ_FFPROBE", "ffprobe")
+
     # ================= 评分权重（综合总得分 / 阶段分数的加权叠加）=================
     # 各模块在综合总得分中的权重，会自动按权重和归一化，故无需严格等于 1。
     # 键名必须与 main.run_scoring 中组装的模块得分一致：
     #   stage1_dtw / stage2_dtw / completeness / coordination /
     #   knee_power / release_angle / height
     SCORE_WEIGHTS = {
-        "stage1_dtw": 0.30,      # 阶段1（准备-下蹲）DTW 动作相似度
-        "stage2_dtw": 0.30,      # 阶段2（蹬伸-出手）DTW 动作相似度
+        "stage1_dtw": 0.30,      # 阶段1（准备-下蹲）
+        "stage2_dtw": 0.30,      # 阶段2（蹬伸-出手）
         "completeness": 0.10,    # 核心环节技术完整度
         "coordination": 0.10,    # 动力链协同与发力节奏
         "knee_power": 0.10,      # 屈髋屈膝发力与爆发性
@@ -93,6 +120,15 @@ class Config:
         except Exception:
             pass
 
+    # ================= 离线模式（无网络 / 断网测试）=================
+    # 开启后：跳过豆包（Doubao）API 调用，改用本地规则基于六项评分生成评语，
+    # 保证断网情况下流程不报错、不长时间阻塞。
+    # 开关方式：
+    #   1) 环境变量 LQ_OFFLINE=1（部署机最方便，免改代码）
+    #   2) 命令行 python3 main.py <视频> --offline
+    # 注意：--no-llm 是“完全跳过评语”，--offline 是“用本地评语替代”，两者都不会联网。
+    OFFLINE_MODE = bool(int(os.environ.get("LQ_OFFLINE", "0")))
+
     # ================= 实时摄像头（RTSP 高速摄像头，暂未启用）==================
     # 接入实时高速摄像头时使用（见 http_server.py 的启用步骤）。
     # H265 硬解走 RK3588 MPP，对应 pipeline._iter_rtsp_frames（当前为注释状态）。
@@ -103,7 +139,19 @@ class Config:
     CAMERA_WIDTH = 1920          # 高速摄像头输出宽
     CAMERA_HEIGHT = 1080         # 高速摄像头输出高
 
+    # ================= MPP 硬解（H265 视频）=================
+    # 摄像头自带录制为 H265(HEVC)，用 RK3588 MPP 硬件解码，跳过软转码。
+    # 注意：mpp 封装当前只硬解 HEVC，H264 文件仍走 cv2 软解。
+    # MPP 硬解失败（无 mpp_player 库 / 解码异常 / 未切出投篮）时自动回退软转码+cv2。
+    USE_MPP_DECODE = bool(int(os.environ.get("LQ_USE_MPP_DECODE", "1")))
+    # MPP 解码输出分辨率（RGA 直接缩放，非中央裁剪；后续 preprocessor 再做中央竖幅裁剪）。
+    # 应设为摄像头原始输出分辨率。
+    MPP_DISPLAY_W = int(os.environ.get("LQ_MPP_DISPLAY_W", str(CAMERA_WIDTH)))
+    MPP_DISPLAY_H = int(os.environ.get("LQ_MPP_DISPLAY_H", str(CAMERA_HEIGHT)))
+    # MPP 解码帧队列上限（有界队列，背压防堆积丢帧）。
+    MPP_QUEUE_SIZE = int(os.environ.get("LQ_MPP_QUEUE_SIZE", "30"))
+
     # ================= HTTP 实时流服务（暂未启用）==================
-    HTTP_HOST = "0.0.0.0"        # 监听地址，0.0.0.0 供 APP 跨网段访问
-    HTTP_PORT = 8000             # 监听端口
+    HTTP_HOST = "192.168.8.249"       
+    HTTP_PORT = 8899             # 监听端口
 

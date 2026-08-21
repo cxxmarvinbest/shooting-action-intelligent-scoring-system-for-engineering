@@ -5,13 +5,27 @@ API 调用大语言模型评分模块（llm_api）
 职责：封装通过 API 调用大语言模型（豆包 Doubao）生成教练评语的功能。
   1. 根据各评分项组装提示词（Prompt）
   2. 调用 Ark 对话补全接口
-  3. 解析并返回评语文本（含异常兜底）
+  3. 解析并返回评语文本（含离线模式 / 异常兜底）
+
+离线模式（OFFLINE）：
+  - 开启后【完全不发起网络请求】，改用本地规则基于六项评分生成评语，
+    用于无网络 / 断网测试，保证流程不报错、不阻塞。
+  - 开关：构造 LLMCoach(offline=True) 或环境变量 LQ_OFFLINE=1。
+
+异常兜底：
+  - 在线模式若发生网络异常（断网 / 超时 / DNS 失败 / 非 200 等），
+    自动降级为本地规则评语，不会抛出、不会长时间阻塞（超时默认 30s）。
 
 对外只暴露：LLMCoach
-依赖：requests（不依赖检测、评分、UI 模块）
+依赖：requests（仅在线模式真正用到；离线模式无需联网）
 """
 
+import logging
+import os
+
 import requests
+
+logger = logging.getLogger("basketball_scoring")
 
 
 class LLMCoach:
@@ -20,10 +34,17 @@ class LLMCoach:
     # ── 火山引擎 Ark API 配置 ──
     API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
     API_KEY = "ark-c661ccb2-f3af-4e66-a6b3-cf51d448206e-06359"
-    MODEL_ID = "ep-m-20260720143111-jtzg2"
+    MODEL_ID = "ep-20260821150057-cccgv"
 
-    # 兜底文案（网络异常 / 请求失败时的默认返回）
-    FALLBACK_REPORT = "AI 教练开小差了，未能生成报告。"
+    # 在线请求超时（秒）：断网/弱网时尽快失败，避免主流程长时间阻塞
+    REQUEST_TIMEOUT = 30
+
+    # 极端兜底（仅在本地规则也不可用时，原则上不会走到）
+    FALLBACK_REPORT = "AI 教练评语生成失败，但评分流程已完成。"
+
+    def __init__(self, offline=False):
+        # offline 可由环境变量 LQ_OFFLINE=1 强制开启（部署机免改代码）
+        self.offline = offline or bool(int(os.environ.get("LQ_OFFLINE", "0")))
 
     def build_prompt(self, score1, score2, completeness_score,
                      coord_score, knee_score, release_score):
@@ -38,23 +59,75 @@ class LLMCoach:
 6. 出手角度得分：{release_score:.1f}/100
 [输出格式要求]
 必须直接输出以下三段内容，禁止任何自我介绍或"收到"、"好的"等客套话，总字数控制在 150 字左右：
-1.亮点：[结合得分最高的1-2个指标，夸奖动作做得好的地方]
-2.问题：[结合得分偏低或不达标的指标，指出动作中的断档或核心硬伤]
+1.亮点：[选取完整度、动力链协同、屈膝爆发力、出手角度中得分最高 1‑2 项，肯定该技术环节完成质量，动作流程表现稳定]
+2.问题：[部分技术维度分数偏低，存在动作衔接断档，发力链条传递存在缺陷，部分关键动作执行质量有待提升]
 3.建议：进行[具体的辅助训练]练习/辅助练习，加入[具体的修正细节]动作，体会[具体身体部位或技术环节]的发力。
 """
 
-    def generate_report(self, score1, score2, completeness_score,
-                        coord_score, knee_score, release_score):
+    def _build_local_report(self, score1, score2, completeness_score,
+                            coord_score, knee_score, release_score,
+                            reason="offline"):
         """
-        调用大语言模型生成教练评语。
+        离线 / 网络异常时的本地规则化评语（无网络依赖）。
 
-        参数：六项评分数据
-        返回：评语文本（失败时返回兜底文案或错误信息）
+        reason:
+            "offline"       -> 离线模式主动跳过联网
+            "network_fail"  -> 在线模式尝试联网但失败，降级而来
+        返回：可直接展示的评语文本。
         """
+        # 统一到 0~100 量级做极值比较（完整度为百分比，其余为 /100，量纲一致）
+        items = [
+            ("准备下蹲阶段动作相似度", score1),
+            ("蹬伸出手阶段动作相似度", score2),
+            ("核心技术环节完整度", completeness_score),
+            ("动力链协同发力", coord_score),
+            ("屈髋屈膝发力", knee_score),
+            ("出手角度", release_score),
+        ]
+        best_name, best_val = max(items, key=lambda kv: kv[1])
+        worst_name, worst_val = min(items, key=lambda kv: kv[1])
+
+        if reason == "network_fail":
+            header = "【豆包接口暂不可用 · 本地自动评语】"
+            note = "（豆包大模型接口调用失败，已自动降级为基于评分的本地规则分析）"
+        else:
+            header = "【离线模式 · 本地自动评语】"
+            note = "（未接入豆包大模型，以上为基于评分的本地规则分析，仅供参考）"
+
+        lines = [header,
+                 f"亮点：{best_name}表现最好（{best_val:.1f}/100），请保持该环节的技术稳定性。"]
+        if worst_val < 75.0:
+            lines.append(
+                f"待改进：{worst_name}偏低（{worst_val:.1f}/100），建议针对性加强该环节的训练与纠正。")
+        else:
+            lines.append(
+                f"整体：各项指标均达合格线（最低为{worst_name} {worst_val:.1f}/100），"
+                f"动作完成度较好，可继续打磨细节。")
+        lines.append(note)
+        return "\n".join(lines)
+
+    def generate_report(self, score1, score2, completeness_score,
+                        coord_score, knee_score, release_score,
+                        offline=None):
+        """
+        生成教练评语。
+
+        参数：
+            score1/score2/completeness_score/coord_score/knee_score/release_score：六项评分
+            offline：
+                None -> 使用 self.offline（构造时的开关 / 环境变量）
+                True -> 强制离线，不发起网络请求
+                False -> 强制在线
+        返回：评语文本。离线或异常时返回本地规则评语，绝不抛出。
+        """
+        use_offline = self.offline if offline is None else offline
+        if use_offline:
+            return self._build_local_report(score1, score2, completeness_score,
+                                            coord_score, knee_score, release_score,
+                                            reason="offline")
+
         ai_prompt = self.build_prompt(score1, score2, completeness_score,
                                       coord_score, knee_score, release_score)
-
-        ai_report = self.FALLBACK_REPORT
         try:
             headers = {
                 "Content-Type": "application/json",
@@ -69,11 +142,22 @@ class LLMCoach:
                     }
                 ]
             }
-            response = requests.post(self.API_URL, headers=headers, json=payload, timeout=360)
+            response = requests.post(self.API_URL, headers=headers,
+                                     json=payload, timeout=self.REQUEST_TIMEOUT)
             if response.status_code == 200:
                 resp_json = response.json()
-                ai_report = resp_json['choices'][0]['message']['content']
+                return resp_json['choices'][0]['message']['content']
+            # 非 200：接口可用但业务出错，降级为本地评语
+            logger.warning("豆包 API 返回非 200 状态码 %s（响应：%s），降级为本地评语",
+                           response.status_code, response.text[:200])
+            return self._build_local_report(score1, score2, completeness_score,
+                                            coord_score, knee_score, release_score,
+                                            reason="network_fail")
         except Exception as e:
-            ai_report = f"AI 请求失败: {str(e)}"
-
-        return ai_report
+            # 断网 / 超时 / DNS 失败等任意异常，均降级为本地评语，不抛出。
+            # 记录具体异常类型便于部署时定位（DNS 失败 / 连接超时 / 证书问题等）。
+            logger.warning("豆包 API 调用异常（%s: %s），降级为本地评语",
+                           type(e).__name__, e)
+            return self._build_local_report(score1, score2, completeness_score,
+                                            coord_score, knee_score, release_score,
+                                            reason="network_fail")
