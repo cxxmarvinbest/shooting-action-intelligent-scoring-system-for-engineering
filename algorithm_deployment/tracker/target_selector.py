@@ -6,7 +6,6 @@
   1. select_main_player —— 从多个人体框中按面积选出主球员
   2. filter_balls     —— 从检测结果中按长宽比/尺寸/位置约束筛选篮球
 
-与原 detection_tracking_rknn.py 内联逻辑完全一致，仅为职责分离。
 依赖：config
 """
 

@@ -1,0 +1,81 @@
+# ===================== Python 缓存与编译产物 =====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===================== IDE编辑器配置 =====================
+# PyCharm IDE
+.idea/
+*.iml
+*.iws
+*.idea
+out/
+
+# VSCode
+.vscode/
+*.code-workspace
+.history/
+
+# ===================== CMake / C++编译产物 mpp模块 =====================
+**/build/
+**/build-release/
+**/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.out
+
+# ===================== 模型权重、大二进制文件（按需选择） =====================
+# 权重文件体积大，不提交git，放到本地，版本库只放代码
+*.rknn
+*.onnx
+*.pt
+*.pth
+*.weights
+
+# 如果需要跟踪部分权重，就注释上面，使用 ! 例外，示例：
+# !weights/small_demo.onnx
+
+# ===================== 日志、临时文件、输出 =====================
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+*.tmp
+*.temp
+output/
+runs/
+logs/
+*.txt
+!requirements.txt
+
+# ===================== 系统文件 =====================
+.DS_Store
+Thumbs.db
+
+# ===================== 本地环境、密钥、私有配置 =====================
+.env
+*.env
+config_local.py
+local_settings.py

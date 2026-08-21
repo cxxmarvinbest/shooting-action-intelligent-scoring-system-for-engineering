@@ -12,6 +12,7 @@
   - 标准视频为 544x960 竖屏；RTSP 摄像头视频为 1920x1080 横屏。
 """
 
+import json
 import os
 
 
@@ -31,6 +32,11 @@ class Config:
     # 评分结果输出目录（分段视频 + 逐帧图）
     OUTPUT_DIR = os.environ.get(
         "LQ_OUT_DIR", "/home/linaro/code/intelligent_scoring_system/outputs")
+    # 标准视频库特征缓存文件（冠军样本角度序列 + 平均出手高度，.npz）
+    # 首次运行生成，之后每次评分直接读缓存，避免重复跑标准视频库推理。
+    # 更换标准视频库或修改 FRAME_STRIDE 后，删除此文件重新生成。
+    STANDARD_CACHE_PATH = os.environ.get(
+        "LQ_STANDARD_CACHE", "/home/linaro/code/intelligent_scoring_system/cache/standard_lib.npz")
 
     # ================= 描黑边预处理参数 =================
     # 目标尺寸：与标准视频一致（宽 x 高）
@@ -62,3 +68,42 @@ class Config:
     # 隔帧采样步长：2 表示每隔一帧分析一帧（检测+姿态+特征只做一次，速度约快一倍）。
     # 输出图片/分段视频也按此步长隔帧写出；评分里的时长/角速度用 fps/FRAME_STRIDE 折算。
     FRAME_STRIDE = int(os.environ.get("LQ_FRAME_STRIDE", "2"))
+
+    # ================= 评分权重（综合总得分 / 阶段分数的加权叠加）=================
+    # 各模块在综合总得分中的权重，会自动按权重和归一化，故无需严格等于 1。
+    # 键名必须与 main.run_scoring 中组装的模块得分一致：
+    #   stage1_dtw / stage2_dtw / completeness / coordination /
+    #   knee_power / release_angle / height
+    SCORE_WEIGHTS = {
+        "stage1_dtw": 0.30,      # 阶段1（准备-下蹲）DTW 动作相似度
+        "stage2_dtw": 0.30,      # 阶段2（蹬伸-出手）DTW 动作相似度
+        "completeness": 0.10,    # 核心环节技术完整度
+        "coordination": 0.10,    # 动力链协同与发力节奏
+        "knee_power": 0.10,      # 屈髋屈膝发力与爆发性
+        "release_angle": 0.05,   # 出手角度
+        "height": 0.05,          # 出手高度
+    }
+    # 阶段1 / 阶段2 分数中，DTW 自身所占比例；剩余部分由其它模块的加权均分补足。
+    # 例：0.7 -> 阶段1 = 0.7*阶段1_DTW + 0.3*其它模块加权均分。
+    PHASE_DTW_RATIO = float(os.environ.get("LQ_PHASE_DTW_RATIO", "0.7"))
+    # 支持通过环境变量 LQ_SCORE_WEIGHTS（JSON 字符串）整体覆盖 SCORE_WEIGHTS，便于部署调参。
+    if os.environ.get("LQ_SCORE_WEIGHTS"):
+        try:
+            SCORE_WEIGHTS = json.loads(os.environ["LQ_SCORE_WEIGHTS"])
+        except Exception:
+            pass
+
+    # ================= 实时摄像头（RTSP 高速摄像头，暂未启用）==================
+    # 接入实时高速摄像头时使用（见 http_server.py 的启用步骤）。
+    # H265 硬解走 RK3588 MPP，对应 pipeline._iter_rtsp_frames（当前为注释状态）。
+    CAMERA_IP = "192.168.8.89"
+    CAMERA_USER = "admin"
+    CAMERA_PASSWORD = "siboasi123"
+    CAMERA_RTSP_URL = "rtsp://admin:siboasi123@192.168.8.89:554/h264/ch1/main/av_stream"
+    CAMERA_WIDTH = 1920          # 高速摄像头输出宽
+    CAMERA_HEIGHT = 1080         # 高速摄像头输出高
+
+    # ================= HTTP 实时流服务（暂未启用）==================
+    HTTP_HOST = "0.0.0.0"        # 监听地址，0.0.0.0 供 APP 跨网段访问
+    HTTP_PORT = 8000             # 监听端口
+

@@ -1,3 +1,0 @@
-/home/linaro/code/mpp/build/CMakeFiles/mpp_player.dir
-/home/linaro/code/mpp/build/CMakeFiles/edit_cache.dir
-/home/linaro/code/mpp/build/CMakeFiles/rebuild_cache.dir

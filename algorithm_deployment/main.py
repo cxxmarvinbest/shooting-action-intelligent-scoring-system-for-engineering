@@ -13,7 +13,7 @@
   python3 main.py <测试视频路径> --std-dir <标准视频目录> --out-dir <输出目录>
   python3 main.py <测试视频路径> --no-llm          # 离线调试，跳过豆包评语
 
-依赖：pipeline（VideoAnalyzer）、scoring（ScoringEngine）、llm_api（LLMCoach）
+依赖：pipeline（VideoAnalyzer）、standard_lib（StandardLibrary）、scoring（ScoringEngine）、llm_api（LLMCoach）
 """
 
 import argparse
@@ -30,6 +30,7 @@ from config import Config
 from pipeline import VideoAnalyzer
 from scoring import ScoringEngine
 from llm_api import LLMCoach
+from standard_lib import StandardLibrary
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -81,7 +82,7 @@ def setup_logging(log_dir):
 _REPORT_LABELS = {
     "completeness": "核心环节技术完整度",
     "coordination": "动力链协同与发力节奏",
-    "knee_power": "屈膝发力与爆发性",
+    "knee_power": "屈髋屈膝发力与爆发性",
     "release_angle": "出手角度",
 }
 
@@ -103,15 +104,14 @@ def build_report_text(result):
         f"  逐帧图片目录           : {result['frames_dir']}",
         "",
         "【评分结果】",
-        f"  综合总得分              : {s['final_score']:.1f} / 100",
-        f"  阶段1（准备-下蹲）DTW   : {s['stage1_dtw']:.1f} / 100（平均距离 {s['stage1_dtw_deg']:.3f}）",
-        f"  阶段2（蹬伸-出手）DTW   : {s['stage2_dtw']:.1f} / 100（平均距离 {s['stage2_dtw_deg']:.3f}）",
-        f"  核心环节技术完整度      : {s['completeness']:.1f} %",
+        f"  综合总得分           : {s['final_score']:.1f} / 100",
+        f"  阶段1（准备-下蹲）    : {s['stage1_dtw']:.1f} / 100",
+        f"  阶段2（蹬伸-出手）    : {s['stage2_dtw']:.1f} / 100",
+        f"  核心环节技术完整度     : {s['completeness']:.1f} %",
         f"  动力链协同与发力节奏    : {s['coordination']:.1f} / 100",
-        f"  屈膝发力与爆发性        : {s['knee_power']:.1f} / 100",
-        f"  出手角度                : {s['release_angle']:.1f} / 100",
-        f"  出手高度（相对值）      : {s['test_rel_height']:.2f}"
-        f"（标准参考 {s['avg_std_height']:.2f}，得分 {s['height']:.1f} / 100）",
+        f"  屈髋屈膝发力与爆发性    : {s['knee_power']:.1f} / 100",
+        f"  出手角度              : {s['release_angle']:.1f} / 100",
+        f"  出手高度（相对值）      : {s['height']:.1f} / 100"
         "",
         "【逐模块原始报告】",
     ]
@@ -153,29 +153,12 @@ def run_scoring(test_video_path, standard_videos, out_dir, skip_llm=False):
     analyzer.load_models()
     logger.info("模型加载完成")
 
-    # ── 处理标准视频库 ──
-    std_seqs1, std_seqs2, std_heights = [], [], []
-    for i, path in enumerate(standard_videos):
-        s1, s2, _, _, rel_h, _ = analyzer.process_video(path.strip(), save_visuals=False)
-        if s1 is not None and len(s1) > 2:
-            std_seqs1.append(s1)
-        if s2 is not None and len(s2) > 2:
-            std_seqs2.append(s2)
-        if rel_h > 0:
-            std_heights.append(rel_h)
-        logger.info("标准视频 %d/%d 处理完成: %s",
-                    i + 1, len(standard_videos), os.path.basename(path.strip()))
-
-    avg_std_height = sum(std_heights) / len(std_heights) if std_heights else 0.5
+    # ── 预加载标准视频库特征（只跑一次推理，缓存冠军样本 + 平均出手高度）──
+    std_lib = StandardLibrary(analyzer)
+    std_lib.build(standard_videos, cache_path=Config.STANDARD_CACHE_PATH)
+    champ1, champ2 = std_lib.champ1, std_lib.champ2
+    avg_std_height = std_lib.avg_std_height
     result["avg_std_height"] = round(float(avg_std_height), 4)
-
-    if not std_seqs1 or not std_seqs2:
-        raise ValueError("标准视频库解析失败，无法提取两段动作特征！")
-
-    # ── 冠军样本选择（DTW 中位样本）──
-    champ1 = ScoringEngine.select_champion(std_seqs1)
-    champ2 = ScoringEngine.select_champion(std_seqs2)
-    logger.info("冠军样本选择完成")
 
     # ── 处理测试视频（含可视化输出：分段视频 + 逐帧图）──
     logger.info("处理测试视频并输出分段视频/逐帧图 ...")
@@ -191,8 +174,8 @@ def run_scoring(test_video_path, standard_videos, out_dir, skip_llm=False):
 
     # ── 各项评分 ──
     height_score = ScoringEngine.compute_height_score(test_rel_h, avg_std_height)
-    deg1, score1 = ScoringEngine.compute_dtw_distance(champ1, test_s1)
-    deg2, score2 = ScoringEngine.compute_dtw_distance(champ2, test_s2)
+    deg1, dtw_score1 = ScoringEngine.compute_dtw_distance(champ1, test_s1)
+    deg2, dtw_score2 = ScoringEngine.compute_dtw_distance(champ2, test_s2)
     coord_score, coord_report = ScoringEngine.compute_coordination(test_metrics)
     video_fps = getattr(analyzer, 'current_fps', 30.0)
     knee_score, knee_report = ScoringEngine.compute_knee_power(test_metrics, fps=video_fps)
@@ -200,17 +183,40 @@ def run_scoring(test_video_path, standard_videos, out_dir, skip_llm=False):
     completeness_score, completeness_report = ScoringEngine.compute_completeness(
         test_metrics, fps=video_fps)
 
-    final_score = (score1 + score2) / 2.0
+    # ── 加权叠加：DTW 评分与其它模块评分按权重融合，覆盖综合总得分 / 阶段1 / 阶段2 ──
+    # 各模块得分（0~100），键名与 Config.SCORE_WEIGHTS 一一对应
+    module_scores = {
+        "stage1_dtw": dtw_score1,
+        "stage2_dtw": dtw_score2,
+        "completeness": completeness_score,
+        "coordination": coord_score,
+        "knee_power": knee_score,
+        "release_angle": release_score,
+        "height": height_score,
+    }
+    # 其它模块（非 DTW）的加权均分，用于阶段1/阶段2 的加权叠加
+    aux_scores = {k: v for k, v in module_scores.items()
+                  if k not in ("stage1_dtw", "stage2_dtw")}
+    aux_weighted = ScoringEngine.combine_scores(aux_scores, Config.SCORE_WEIGHTS)
+
+    # 阶段1 / 阶段2：DTW 自身按 PHASE_DTW_RATIO 占比，其余由其它模块加权均分补足
+    ratio = Config.PHASE_DTW_RATIO
+    score1 = ratio * dtw_score1 + (1.0 - ratio) * aux_weighted
+    score2 = ratio * dtw_score2 + (1.0 - ratio) * aux_weighted
+    # 综合总得分：全部模块按权重加权叠加（权重自动归一化）
+    final_score = ScoringEngine.combine_scores(module_scores, Config.SCORE_WEIGHTS)
 
     # ── 汇总日志 ──
     logger.info("-" * 60)
     logger.info("【评分结果汇总】")
-    logger.info("综合总得分            : %.1f / 100", final_score)
-    logger.info("阶段1（准备-下蹲）DTW : %.1f / 100（平均距离 %.3f）", score1, deg1)
-    logger.info("阶段2（蹬伸-出手）DTW : %.1f / 100（平均距离 %.3f）", score2, deg2)
+    logger.info("综合总得分（加权）    : %.1f / 100", final_score)
+    logger.info("阶段1（准备-下蹲）DTW : %.1f / 100（平均距离 %.3f）", dtw_score1, deg1)
+    logger.info("阶段2（蹬伸-出手）DTW : %.1f / 100（平均距离 %.3f）", dtw_score2, deg2)
+    logger.info("阶段1（准备-下蹲）加权: %.1f / 100", score1)
+    logger.info("阶段2（蹬伸-出手）加权: %.1f / 100", score2)
     logger.info("核心环节技术完整度    : %.1f %%", completeness_score)
     logger.info("动力链协同与发力节奏  : %.1f / 100", coord_score)
-    logger.info("屈膝发力与爆发性      : %.1f / 100", knee_score)
+    logger.info("屈髋屈膝发力与爆发性  : %.1f / 100", knee_score)
     logger.info("出手角度              : %.1f / 100", release_score)
     logger.info("出手高度（相对值）    : %.2f（标准参考 %.2f，得分 %.1f / 100）",
                 test_rel_h, avg_std_height, height_score)
@@ -232,7 +238,7 @@ def run_scoring(test_video_path, standard_videos, out_dir, skip_llm=False):
         logger.info("【AI 大模型评语】已按 --no-llm 跳过")
     else:
         coach = LLMCoach()
-        ai_report = coach.generate_report(score1, score2, completeness_score,
+        ai_report = coach.generate_report(dtw_score1, dtw_score2, completeness_score,
                                           coord_score, knee_score, release_score)
         logger.info("【AI 大模型（豆包）智能教练评语】\n%s", ai_report)
 
