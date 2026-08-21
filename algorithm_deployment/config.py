@@ -73,19 +73,36 @@ class Config:
     # 环形队列预缓存帧数：出手事件触发后回退至少要能拿到的历史帧数。
     RING_PRECACHE_FRAMES = int(os.environ.get("LQ_RING_PRECACHE", "35"))
     # 环形缓存总容量（≥ 预缓存 + 最大动作窗口）。deque(maxlen) 滚动覆盖，天然防内存耗尽。
-    RING_MAX_FRAMES = int(os.environ.get("LQ_RING_MAX", "120"))
+    # 放宽到 200：一次完整投篮约 15~35 采样帧（实拍 30~70 帧@stride=2），
+    # 连续多次投篮 + 间隔需留足历史，避免回退窗口被覆盖。
+    RING_MAX_FRAMES = int(os.environ.get("LQ_RING_MAX", "200"))
     # 持球防抖：连续 N 帧判定为持球才确认（滤除单帧误检）。
     HOLD_DEBOUNCE_FRAMES = int(os.environ.get("LQ_HOLD_DEBOUNCE", "3"))
     # 持球超时：确认持球后 N 帧内未触发出手事件则放弃该候选，避免挂死在未闭合动作。
     HOLD_TIMEOUT_FRAMES = int(os.environ.get("LQ_HOLD_TIMEOUT", "60"))
     # 出手后回退的最大滑动窗口（反向回溯真实动作起点用），应 ≥ 预缓存。
-    LOOKBACK_WINDOW_FRAMES = int(os.environ.get("LQ_LOOKBACK_WINDOW", "90"))
+    # 放宽到 120：保证一次 30~70 帧的完整投篮（含站直-下蹲-蹬伸-出手）全程落在窗口内，
+    # 不被截断；也避免连续投篮时上一投残影干扰本投起点。
+    LOOKBACK_WINDOW_FRAMES = int(os.environ.get("LQ_LOOKBACK_WINDOW", "120"))
     # 手腕最高点（出手瞬间）检测窗口：在最近 N 帧 wrist_y 中找极小值拐点。
     RELEASE_TRIGGER_WINDOW = int(os.environ.get("LQ_RELEASE_WINDOW", "5"))
     # 持球判定：球框与球员框相交判定时，球员框外扩的像素余量（吸收检测框抖动）。
     HOLD_IOU_MARGIN = int(os.environ.get("LQ_HOLD_IOU_MARGIN", "10"))
+
+    # ---------- 动作起点检测（站直 -> 下蹲分界，替代原「球-人框不再相交」）----------
+    # 终点（出手）保留现有「手腕 y 极小值拐点」逻辑；
+    # 起点改为：从终点向前回溯，找「膝关节角首次低于阈值」的帧 ——
+    #   且该帧之前膝关节角连续稳定高位（> 站立阈值），作为从站直到下蹲的分界点。
+    # 真实投篮屈膝下蹲时膝关节角会明显 < 150°（常到 90~120°）；
+    # 仅站立/举手不出手的假动作则全程 > 165°，可被「真实下蹲」门控过滤。
+    KNEE_SQUAT_THRESHOLD = float(os.environ.get("LQ_KNEE_SQUAT_THR", "150"))  # 屈膝下蹲判定阈值(°)
+    KNEE_STAND_MIN = float(os.environ.get("LQ_KNEE_STAND_MIN", "165"))       # 稳定站立判定阈值(°)
+    KNEE_STABLE_FRAMES = int(os.environ.get("LQ_KNEE_STABLE", "5"))          # 站立需连续稳定的帧数
+
     # 最短有效动作段长度（采样帧数）：段长过短视为误检，直接丢弃（不评分、不输出）。
-    MIN_SHOT_FRAMES = int(os.environ.get("LQ_MIN_SHOT_FRAMES", "10"))
+    # 实拍一次投篮约 15~35 采样帧（30~70 实拍帧@stride=2），取 8 留足余量
+    # （8 采样帧 = 16 实拍帧，远小于真实投篮下限，不会误丢真实动作）。
+    MIN_SHOT_FRAMES = int(os.environ.get("LQ_MIN_SHOT_FRAMES", "8"))
 
     # ================= H265 视频自动转码预处理 =================
     # 摄像头自带录制通常产出 H265(HEVC)，且 RTSP 录制常缺 IDR 关键帧/moov，

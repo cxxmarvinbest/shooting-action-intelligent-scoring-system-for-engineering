@@ -14,9 +14,10 @@
   - 环形队列永远滚动覆盖，deque(maxlen) 有界，天然不堆积、不耗尽内存。
   - 持球防抖：连续 HOLD_DEBOUNCE_FRAMES 帧判为持球才确认。
   - 持球超时：HOLD_TIMEOUT_FRAMES 帧内未触发出手即放弃，不挂死在未闭合动作。
-  - 出手事件：wrist_y 在滑动窗口内出现极小值拐点（手腕举到最高点后回升）。
-  - 滑动窗口回退 + 反向回溯：出手后回退 LOOKBACK_WINDOW_FRAMES 帧，
-    反向找「球与人框首次相交」的真实动作起点。
+  - 终点（出手事件）：wrist_y 在滑动窗口内出现极小值拐点（手腕举到最高点后回升）。
+  - 起点（站直->下蹲）：从终点向前回溯，找「膝关节角首次低于 KNEE_SQUAT_THRESHOLD」
+    且该帧之前膝关节角连续稳定高位（> KNEE_STAND_MIN）的帧，作为动作真实起点。
+  - 真实下蹲门控：切出的段必须含一次真实屈膝（min 膝角 < 阈值），否则视为误检丢弃。
 
 对外暴露：KeypointRingBuffer / ShotSegmenter
 依赖：config
@@ -55,7 +56,7 @@ class KeypointRingBuffer:
 
 
 class ShotSegmenter:
-    """投篮动作切分器：持球防抖 + 超时兜底 + 手腕最高点出手检测 + 滑动窗口反向回溯。"""
+    """投篮动作切分器：持球防抖 + 超时兜底 + 手腕最高点出手 + 膝盖下蹲起点回溯 + 真实下蹲门控。"""
 
     IDLE = 0          # 未持球，等待持球
     HOLD_PENDING = 1  # 疑似持球（防抖计数中）
@@ -67,7 +68,10 @@ class ShotSegmenter:
                  timeout=None,
                  lookback=None,
                  release_window=None,
-                 iou_margin=None):
+                 iou_margin=None,
+                 knee_squat_thr=None,
+                 knee_stand_min=None,
+                 knee_stable_frames=None):
         self.ring = ring or KeypointRingBuffer()
         self.precache = precache if precache is not None else Config.RING_PRECACHE_FRAMES
         self.debounce = debounce if debounce is not None else Config.HOLD_DEBOUNCE_FRAMES
@@ -76,6 +80,13 @@ class ShotSegmenter:
         self.release_window = (release_window if release_window is not None
                                else Config.RELEASE_TRIGGER_WINDOW)
         self.iou_margin = iou_margin if iou_margin is not None else Config.HOLD_IOU_MARGIN
+        # 动作起点（站直->下蹲）检测参数
+        self.knee_squat_thr = (knee_squat_thr if knee_squat_thr is not None
+                               else Config.KNEE_SQUAT_THRESHOLD)
+        self.knee_stand_min = (knee_stand_min if knee_stand_min is not None
+                               else Config.KNEE_STAND_MIN)
+        self.knee_stable_frames = (knee_stable_frames if knee_stable_frames is not None
+                                   else Config.KNEE_STABLE_FRAMES)
 
         self.state = self.IDLE
         self.hold_count = 0   # 连续持球帧计数（防抖）
@@ -131,23 +142,91 @@ class ShotSegmenter:
         return None
 
     # ------------------------------------------------------------------
-    # 滑动窗口回退 + 反向回溯真实动作起点
+    # 滑动窗口回退 + 反向回溯真实动作起点（站直 -> 下蹲分界，基于膝关节角）
     # ------------------------------------------------------------------
+    @staticmethod
+    def _knee_angle(m):
+        """取帧 m 的膝关节角（angles[3]）；缺失返回 None。"""
+        ang = m.get('angles')
+        if not ang or len(ang) < 4:
+            return None
+        return ang[3]
+
     def _find_action_start(self, window):
-        """在窗口内反向回溯：找最后一个「不持球」帧，其后的帧即真实动作起点（持球开始）。"""
-        last_not_held = None
-        for m in window:
-            if not self._is_ball_held(m):
-                last_not_held = m['idx']
+        """反向回溯找「从站直到下蹲」的分界点 = 当前投篮动作的真实起点。
+
+        步骤：
+          1) 从窗口末帧（最靠近出手）向前回溯，定位当前投篮的「连续下蹲段」：
+             段内膝关节角 < KNEE_SQUAT_THRESHOLD（如 150°）。
+          2) 向前扩展找到该下蹲段的起始帧 s（膝关节由高(站立)跨入低(下蹲)的那一帧）。
+          3) 校验 s 之前是否稳定站立：允许少量过渡帧(150~165°)，
+             此后需连续 KNEE_STABLE_FRAMES 帧 knee > KNEE_STAND_MIN（如 165°），
+             确认此前确实处于站立/稳定状态（而非前一次下蹲残影）；满足则 s 为动作起点。
+          4) 找不到下蹲段或站立校验不通过时，回退为窗口首帧（由外部门控过滤误检），
+             不误丢真实动作主体。
+        """
         if not window:
             return 0
-        if last_not_held is None:
-            # 整个窗口都处于持球，起点取窗口首帧
-            return window[0]['idx']
-        for m in window:
-            if m['idx'] > last_not_held:
-                return m['idx']
-        return window[-1]['idx']
+        ordered = sorted(window, key=lambda m: m['idx'])
+        n = len(ordered)
+
+        # 1) 从后往前找第一个下蹲帧（knee < thr）
+        first_low = None
+        for i in range(n - 1, -1, -1):
+            k = self._knee_angle(ordered[i])
+            if k is not None and k < self.knee_squat_thr:
+                first_low = i
+                break
+        if first_low is None:
+            # 整段无下蹲 -> 取窗口首帧兜底（真实误检由外部 MIN_SHOT_FRAMES / 下蹲门控过滤）
+            return ordered[0]['idx']
+
+        # 2) 向前扩展，定位连续下蹲段起点 s（站立 -> 下蹲的跨入帧）
+        s = first_low
+        while s > 0:
+            k_prev = self._knee_angle(ordered[s - 1])
+            if k_prev is not None and k_prev < self.knee_squat_thr:
+                s -= 1
+            else:
+                break
+
+        # 3) 校验 s 之前是否稳定站立：允许少量过渡帧(150~165°)，
+        #    此后需连续 KNEE_STABLE_FRAMES 帧 knee > KNEE_STAND_MIN(如 165°)，
+        #    确认此前确实处于站立/稳定状态（而非仍处前一次下蹲残影）。
+        stable_ok = False
+        consecutive = 0
+        trans_count = 0
+        i = s - 1
+        while i >= 0:
+            k = self._knee_angle(ordered[i])
+            if k is None:
+                break
+            if k > self.knee_stand_min:
+                consecutive += 1
+                if consecutive >= self.knee_stable_frames:
+                    stable_ok = True
+                    break
+            elif self.knee_squat_thr < k <= self.knee_stand_min:
+                # 过渡区(如 150~165°)：计入少量允许范围，但不计入稳定站立
+                trans_count += 1
+                consecutive = 0
+                if trans_count > self.knee_stable_frames:
+                    break
+            else:
+                # 又出现更低角度 -> s 之前仍是下蹲，不是真正的「站立->下蹲」分界
+                break
+            i -= 1
+
+        # 4) 稳定站立校验通过 -> s 为动作起点；否则仍取下蹲段起点（避免误丢真实动作）
+        return ordered[s]['idx']
+
+    def _segment_has_squat(self, metrics):
+        """段内是否含一次真实屈膝（min 膝角 < 阈值）。用于过滤无下蹲的假投篮。"""
+        for m in metrics:
+            k = self._knee_angle(m)
+            if k is not None and k < self.knee_squat_thr:
+                return True
+        return False
 
     def _build_segment(self, release_idx):
         # 回退取最大窗口：至少保证预缓存 precache 帧历史可回溯
@@ -163,12 +242,14 @@ class ShotSegmenter:
         metrics = [m for m in window if start_idx <= m['idx'] <= release_idx]
         if not metrics:
             metrics = window_before
+        has_squat = self._segment_has_squat(metrics)
         self.shot_count += 1
         return {
             'shot_idx': self.shot_count,
             'start_idx': start_idx,
             'release_idx': release_idx,
             'frame_metrics': metrics,
+            'has_squat': has_squat,
         }
 
     def _reset(self):

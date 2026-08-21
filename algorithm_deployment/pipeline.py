@@ -245,9 +245,14 @@ class VideoAnalyzer:
             if seg is None:
                 continue
             if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:
-                logger.warning("丢弃过短误检段: 起点=%d, 出手=%d, 段长=%d 帧 < %d",
+                logger.warning("丢弃过短段: 起点=%d, 出手=%d, 段长=%d 帧 < %d",
                                seg['start_idx'], seg['release_idx'],
                                len(seg['frame_metrics']), Config.MIN_SHOT_FRAMES)
+                continue
+            if not seg.get('has_squat'):
+                logger.warning("丢弃无真实下蹲的误检段: 起点=%d, 出手=%d, 段长=%d 帧",
+                               seg['start_idx'], seg['release_idx'],
+                               len(seg['frame_metrics']))
                 continue
             seq1, seq2, rel_height, idx_squat = self._split_and_height(
                 seg['frame_metrics'])
@@ -788,9 +793,14 @@ class VideoAnalyzer:
             if seg is not None:
                 # 过滤过短误检段（如出手前后仅 2 帧的假投篮）
                 if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:
-                    logger.warning("丢弃过短误检段: 起点=%d, 出手=%d, 段长=%d 帧 < %d",
+                    logger.warning("丢弃过短段: 起点=%d, 出手=%d, 段长=%d 帧 < %d",
                                    seg['start_idx'], seg['release_idx'],
                                    len(seg['frame_metrics']), Config.MIN_SHOT_FRAMES)
+                    continue
+                if not seg.get('has_squat'):
+                    logger.warning("丢弃无真实下蹲的误检段: 起点=%d, 出手=%d, 段长=%d 帧",
+                                   seg['start_idx'], seg['release_idx'],
+                                   len(seg['frame_metrics']))
                     continue
                 seq1, seq2, rel_height, idx_squat = self._split_and_height(
                     seg['frame_metrics'])
