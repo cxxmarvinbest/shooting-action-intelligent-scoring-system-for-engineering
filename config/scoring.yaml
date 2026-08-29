@@ -1,0 +1,16 @@
+# scoring.yaml —— 评分权重（综合总得分 / 阶段分数的加权叠加）
+# 各模块权重，按权重和自动归一化，无需严格等于 1。
+# 键名与 ScoringEngine 的模块得分键一一对应：
+#   stage1_dtw / stage2_dtw / completeness / coordination /
+#   knee_power / release_angle / height
+SCORE_WEIGHTS:
+  stage1_dtw: 0.30        # 阶段1（准备-下蹲）
+  stage2_dtw: 0.30        # 阶段2（蹬伸-出手）
+  completeness: 0.10      # 核心环节技术完整度
+  coordination: 0.10      # 动力链协同与发力节奏
+  knee_power: 0.10        # 屈髋屈膝发力与爆发性
+  release_angle: 0.05     # 出手角度
+  height: 0.05            # 出手高度
+
+# 阶段1/阶段2 分数中 DTW 自身占比，剩余由其它模块加权均分补足
+PHASE_DTW_RATIO: 0.7

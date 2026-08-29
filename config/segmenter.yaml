@@ -1,0 +1,24 @@
+# segmenter.yaml —— 投篮动作切分状态机参数（关键点环形缓存 + 持球/出手检测）
+# 环形队列预缓存帧数：出手触发后回退至少要能拿到的历史帧数
+RING_PRECACHE_FRAMES: 50
+# 环形缓存总容量（deque(maxlen) 滚动覆盖，防内存耗尽）
+RING_MAX_FRAMES: 200
+# 持球防抖：连续 N 帧判为持球才确认
+HOLD_DEBOUNCE_FRAMES: 1
+# 持球超时：确认持球后 N 帧内未出手则放弃该候选
+HOLD_TIMEOUT_FRAMES: 70
+# 出手后回退的最大滑动窗口（反向回溯真实动作起点）
+LOOKBACK_WINDOW_FRAMES: 150
+# 手腕最高点（出手瞬间）检测窗口
+RELEASE_TRIGGER_WINDOW: 8
+# 持球判定：球心到手腕的欧氏距离阈值（相对球员框高度 player_h 的比例）。
+# 只有球贴着手腕（球在手上）才判持球，杜绝「球在地上/腰边/腿旁但落在全身框内」的误触发。
+BALL_WRIST_DIST_RATIO: 0.50
+
+# 动作起点检测（站直 -> 下蹲分界，基于膝关节角）
+KNEE_SQUAT_THRESHOLD: 165.0   # 屈膝下蹲判定阈值（°）
+KNEE_STAND_MIN: 150.0         # 稳定站立判定阈值（°）
+KNEE_STABLE_FRAMES: 2         # 站立需连续稳定的帧数
+
+# 最短有效动作段长度（采样帧数），过短视为误检丢弃
+MIN_SHOT_FRAMES: 5

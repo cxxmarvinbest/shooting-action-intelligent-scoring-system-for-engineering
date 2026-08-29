@@ -1,0 +1,4 @@
+# Qt 客户端依赖（Windows 端运行，RK3588 只跑算法）
+PyQt6>=6.5
+requests>=2.28
+

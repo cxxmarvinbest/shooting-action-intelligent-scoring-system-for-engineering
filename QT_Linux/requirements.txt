@@ -1,0 +1,10 @@
+# Qt 客户端依赖（RK3588 aarch64 / Ubuntu 桌面环境）
+#
+# 说明：PyQt5 与 PyQt6 在 PyPI 上均无官方 aarch64 wheel，pip 安装会失败，
+#       建议直接用 apt 安装系统包（Ubuntu 官方源自带 aarch64 的 deb 包）：
+#
+#     sudo apt install -y python3-pyqt5 python3-requests
+#
+# 若环境明确支持 pip 且网络可用，也可用下面两种（通常不推荐在板端走 pip 拉 GUI 依赖）：
+PyQt5>=5.15
+requests>=2.28

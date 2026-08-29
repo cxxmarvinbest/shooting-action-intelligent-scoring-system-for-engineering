@@ -1,0 +1,9 @@
+# camera.yaml —— 摄像头（RTSP 高速摄像头）配置
+CAMERA_IP: "192.168.8.89"
+CAMERA_USER: "admin"
+CAMERA_PASSWORD: "siboasi123"
+CAMERA_RTSP_URL: "rtsp://admin:siboasi123@192.168.8.89:554/h264/ch1/main/av_stream"
+CAMERA_WIDTH: 1920        # 高速摄像头输出宽
+CAMERA_HEIGHT: 1080       # 高速摄像头输出高
+# 是否在本地终端弹窗预览实时画面（工位测试用；RK3588 无 GUI 环境代码会自动关闭不报错）
+SHOW_PREVIEW: true

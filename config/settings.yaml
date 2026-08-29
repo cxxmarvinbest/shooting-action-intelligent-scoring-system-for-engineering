@@ -1,0 +1,7 @@
+# settings.yaml —— 顶层运行设置
+# 离线模式：跳过豆包 API，改用本地规则生成评语（断网/无网测试用）。
+# 也可用环境变量 LQ_OFFLINE=1 覆盖。
+OFFLINE_MODE: false
+
+# 实时识别中「未检测到投篮者/未检测到投篮动作」状态日志的输出间隔（秒）
+REALTIME_STATUS_INTERVAL: 10

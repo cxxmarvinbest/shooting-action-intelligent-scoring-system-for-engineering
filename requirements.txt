@@ -1,0 +1,14 @@
+# 投篮动作评分系统 —— Python 依赖清单
+# 说明：rknn_toolkit_lite2 无法从 pip 官方源安装，须用瑞芯微官方 whl，版本须与 RK3588 固件匹配。
+
+numpy
+scipy
+fastdtw
+opencv-python-headless
+requests
+flask
+pyyaml
+
+# RK3588 板端专用（NPU 推理），用官方 whl 安装：
+#   pip3 install rknn_toolkit_lite2-<版本>-cp310-cp310-linux_aarch64.whl
+# 注意：rknn_toolkit_lite2 不放入 requirements.txt（pip 源无此包）

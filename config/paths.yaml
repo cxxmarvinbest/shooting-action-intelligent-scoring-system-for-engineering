@@ -1,0 +1,7 @@
+# paths.yaml —— 路径配置（相对 PROJECT_ROOT，loader 自动 join 为绝对路径）
+WEIGHTS_DIR: "weights"                                  # 模型权重目录
+STANDARD_VIDEO_DIR: "data/standard"                     # 标准视频库（shot_*.mp4）
+OUTPUT_DIR: "data/output"                               # 评分结果输出目录
+STANDARD_CACHE_PATH: "data/cache/standard_lib.npz"      # 标准库特征缓存
+LOG_DIR: "logs"                                         # 运行日志目录
+RECORD_DIR: "data/output/videos"                        # 实时录制视频目录

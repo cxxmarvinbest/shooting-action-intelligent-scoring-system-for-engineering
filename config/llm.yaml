@@ -1,0 +1,8 @@
+# llm.yaml —— AI 大模型教练评语配置（火山引擎豆包 / Ark API）
+LLM_API_URL: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+LLM_API_KEY: "ark-c661ccb2-f3af-4e66-a6b3-cf51d448206e-06359"
+LLM_MODEL_ID: "ep-20260825083701-2gbrr"
+# 在线请求超时（秒）：断网/弱网时尽快失败降级为本地评语
+LLM_TIMEOUT: 30
+# 默认是否离线（实时场景建议 true，避免断网每投卡 30s）
+LLM_OFFLINE_DEFAULT: false
