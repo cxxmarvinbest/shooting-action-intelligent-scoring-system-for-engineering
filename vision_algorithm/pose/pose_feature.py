@@ -32,57 +32,72 @@ def calculate_angle(a, b, c):
     return np.degrees(angle)
 
 
-def extract_pose_features(kpts, player_box):
+def extract_pose_features(kpts, player_box, kpt_conf=None):
     """
     从单帧关键点提取动作特征。
 
     参数：
         kpts        —— (17,2) ndarray，输入帧坐标系，不可见点坐标为 0
         player_box —— 主球员框 (x1,y1,x2,y2)，可为 None
+        kpt_conf    —— (17,) 各关键点置信度，可为 None；用于构造 visible_mask
 
-    返回：dict，键为 angles / side_str / wrist_y / shoulder_y / player_h / hip_y，
-          缺失项为 None。与原 frame_metrics 结构完全一致。
+    返回：dict，键为 angles / side_str / wrist_x / wrist_y / shoulder_y / player_h /
+          hip_y / ankle_angle / visible_mask。
+          关键点缺失时角度置 None（不再用 160/180 兜底），由上层 FSM 迟滞层容错。
     """
     features = {
         'angles': None, 'side_str': None, 'wrist_x': None, 'wrist_y': None,
         'shoulder_y': None, 'player_h': None, 'hip_y': None,
-        'ankle_angle': None,
+        'ankle_angle': None, 'visible_mask': None,
     }
     if kpts is None:
         return features
 
-    abs_kpts = np.zeros_like(kpts)
-    for i in range(len(kpts)):
-        if kpts[i][0] > 0:
-            abs_kpts[i] = [kpts[i][0], kpts[i][1]]
+    kpts = np.asarray(kpts, dtype=np.float32)
+    n = kpts.shape[0]
 
-    r_s, r_e, r_w = abs_kpts[6], abs_kpts[8], abs_kpts[10]
-    l_s, l_e, l_w = abs_kpts[5], abs_kpts[7], abs_kpts[9]
+    # 可见性掩码：坐标非 0 为可见；若提供 kpt_conf，conf<=0 的点强制判不可见。
+    # 说明：pose_model 已把低置信关键点坐标置 0，此处 conf 仅作二次兜底，
+    #       同时把可见性透传出去供 FSM / 阶段 2 样本分析使用。
+    coord_visible = (kpts[:, 0] > 0) | (kpts[:, 1] > 0)
+    if kpt_conf is not None:
+        conf = np.asarray(kpt_conf, dtype=np.float32).reshape(-1)
+        visible = coord_visible & (conf > 0.0)
+    else:
+        visible = coord_visible
+    features['visible_mask'] = visible.tolist()
 
-    # 区分左右侧（右侧可见优先）
-    if r_w[0] > 0 and r_s[0] > 0:
-        s, e, w, h, k, a = r_s, r_e, r_w, abs_kpts[12], abs_kpts[14], abs_kpts[16]
+    def _vis(i):
+        return bool(visible[i]) if i < n else False
+
+    # 左右侧关键点索引（COCO 17 点）：右侧优先（右肩 6 + 右腕 10 可见则用右侧）
+    if _vis(6) and _vis(10):
+        s_i, e_i, w_i, h_i, k_i, a_i = 6, 8, 10, 12, 14, 16
         side_str = "Right"
     else:
-        s, e, w, h, k, a = l_s, l_e, l_w, abs_kpts[11], abs_kpts[13], abs_kpts[15]
+        s_i, e_i, w_i, h_i, k_i, a_i = 5, 7, 9, 11, 13, 15
         side_str = "Left"
 
-    if s[0] > 0 and h[0] > 0:
-        shoulder = calculate_angle(h, s, e) if e[0] > 0 else 160.0
-        elbow = calculate_angle(s, e, w) if (e[0] > 0 and w[0] > 0) else 180.0
-        hip = calculate_angle(s, h, k) if k[0] > 0 else 180.0
-        knee = calculate_angle(h, k, a) if (k[0] > 0 and a[0] > 0) else 180.0
+    s, e, w = kpts[s_i], kpts[e_i], kpts[w_i]
+    h, k, a = kpts[h_i], kpts[k_i], kpts[a_i]
+
+    # 角度：三点任一不可见 -> 该角度置 None（不再兜底 160/180）
+    if _vis(s_i) and _vis(h_i):
+        shoulder = calculate_angle(h, s, e) if (_vis(s_i) and _vis(e_i) and _vis(h_i)) else None
+        elbow = calculate_angle(s, e, w) if (_vis(s_i) and _vis(e_i) and _vis(w_i)) else None
+        hip = calculate_angle(s, h, k) if (_vis(s_i) and _vis(h_i) and _vis(k_i)) else None
+        knee = calculate_angle(h, k, a) if (_vis(h_i) and _vis(k_i) and _vis(a_i)) else None
 
         features['angles'] = [shoulder, elbow, hip, knee]
         features['side_str'] = side_str
-        features['wrist_x'] = w[0]
-        features['wrist_y'] = w[1]
-        features['shoulder_y'] = s[1]
+        features['wrist_x'] = float(w[0]) if _vis(w_i) else None
+        features['wrist_y'] = float(w[1]) if _vis(w_i) else None
+        features['shoulder_y'] = float(s[1]) if _vis(s_i) else None
         if player_box is not None:
             features['player_h'] = player_box[3] - player_box[1]
 
         # 踝角（近似）：小腿（膝→踝）与竖直向下方向的夹角，用于 Qt 客户端展示
-        if k[0] > 0 and a[0] > 0:
+        if _vis(k_i) and _vis(a_i):
             dx = a[0] - k[0]
             dy = a[1] - k[1]  # 图像坐标系 y 向下为正
             shin_len = (dx * dx + dy * dy) ** 0.5
@@ -92,8 +107,7 @@ def extract_pose_features(kpts, player_box):
                     np.arccos(np.clip(cos_v, -1.0, 1.0))))
 
     # 髋部中心纵坐标（左右髋均值）
-    hips = [kpts[11], kpts[12]]
-    valid_hips_y = [pt[1] for pt in hips if pt[0] > 0]
+    valid_hips_y = [float(kpts[i][1]) for i in (11, 12) if _vis(i)]
     if valid_hips_y:
         features['hip_y'] = sum(valid_hips_y) / len(valid_hips_y)
 

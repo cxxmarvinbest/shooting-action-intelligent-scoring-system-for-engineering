@@ -45,8 +45,9 @@ import cv2  # noqa: E402
 from config import Config  # noqa: E402
 from common.logger import setup_logger  # noqa: E402
 from vision_algorithm.pipeline.video_analyzer import VideoAnalyzer  # noqa: E402
+from vision_algorithm.segmentation.shot_fsm import ShotFSM  # noqa: E402
 from vision_algorithm.segmentation.shot_segmenter import (  # noqa: E402
-    ShotSegmenter, format_shot_time, format_duration)
+    format_shot_time, format_duration)
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -93,7 +94,7 @@ def main():
                 fps, total_frames, vid_w, vid_h)
 
     # 投篮切分状态机（与 process_video_multi 口径一致）
-    segmenter = ShotSegmenter()
+    segmenter = ShotFSM()
     shots = []
 
     times = []        # 正常帧耗时（ms）
@@ -166,7 +167,7 @@ def main():
                         frame_idx, person_str, ball_str, pose_str, dt_ms)
 
         # 喂给投篮切分状态机，检测完整投篮动作
-        seg = segmenter.feed(fd)
+        seg = segmenter.feed(fd).get('shot_event')
         if seg is not None:
             if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:
                 logger.warning("丢弃过短段: 起点=%d, 出手=%d, 段长=%d 帧 < %d",

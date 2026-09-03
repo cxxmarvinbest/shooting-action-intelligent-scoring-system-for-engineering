@@ -11,6 +11,9 @@ is_rgb=False
 rtsp="rtsp://admin:siboasi123@192.168.8.89:554/h264/ch1/main/av_stream"
 display_width=1280
 display_height=720
+is_mpp_scale_img=True#缩放图片
+mpp_scale_w=640#缩放宽度
+mpp_scale_h=640#缩放高度
 def frame_callback(frame_image,scale_image, frame_id,is_rgb):
     global current_frame
     with frame_lock:
@@ -32,7 +35,7 @@ player.set_callback_error(error_callback)
 player.set_print_fps(True,100)
 def play_thread():
     # 不显示窗口，只回调
-    state=player.play(rtsp,display_width=display_width, display_height=display_height,is_rgb=is_rgb)
+    state=player.play(rtsp,display_width=display_width, display_height=display_height,is_rgb=is_rgb,is_mpp_scale_img=is_mpp_scale_img,mpp_scale_w=mpp_scale_w,mpp_scale_h=mpp_scale_h)
     if not state:
         print("播放结束")
 

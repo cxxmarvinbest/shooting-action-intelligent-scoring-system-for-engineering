@@ -20,7 +20,8 @@ from config import Config
 from common.thread_base import ThreadBase
 from common.exceptions import ScoringError
 from vision_algorithm.segmentation.shot_segmenter import (
-    ShotSegmenter, format_shot_time, format_duration)
+    format_shot_time, format_duration)
+from vision_algorithm.segmentation.shot_fsm import ShotFSM
 from vision_algorithm.scoring.report import (
     score_one_shot, html_to_text, build_report_text)
 from vision_algorithm.llm.llm_coach import LLMCoach
@@ -63,7 +64,7 @@ class InferenceManage(ThreadBase):
 
     def reset_session(self):
         """每个运动会话独立：重建切分状态机 + 清零计数/时间戳/结果 + 启用识别。"""
-        self.segmenter = ShotSegmenter()
+        self.segmenter = ShotFSM()
         self.shot_count = 0
         self.last_person_ts = 0.0
         self.last_ball_ts = 0.0
@@ -71,6 +72,8 @@ class InferenceManage(ThreadBase):
         self.last_status_ts = 0.0
         self.results = []
         self.status_msg = ""
+        # 重置跟踪器到无目标状态（新会话重新锁定主球员，避免上一会话残留锁定框）
+        self.analyzer.reset_trackers()
         self.recognition_active = True
 
     def set_recognition_active(self, active):
@@ -87,27 +90,28 @@ class InferenceManage(ThreadBase):
         logger.info("实时分析线程启动（采样步长=%d，状态日志间隔=%ds）", stride, interval)
 
         while not self.is_stopped():
-            frame = self.camera.latest()
-            fidx = self.camera.latest_idx
+            # 原子取「同一解码帧」的 (预览帧, RGA 缩放图, 帧号)，避免 frame 与 scale 错位
+            frame, scale, fidx = self.camera.latest_pair()
             if frame is None or fidx == last_fed_idx:
                 time.sleep(0.005)
                 continue
             last_fed_idx = fidx
 
+            # RGA 缩放图(640x360)在解码启动后前几帧可能尚未产出，跳过本帧等待
+            if scale is None:
+                time.sleep(0.005)
+                continue
+
             # 隔帧采样（与离线评分口径一致）
             if fidx % stride != 0:
                 continue
 
-            # 统一用原始大图做检测：竖幅裁剪 + 长边 640 描黑边 + 检测 + player 裁剪姿态，
-            # 全程在 _extract_frame_metrics 内完成（描黑边等比缩放，非 RGA 拉伸）。
-            # RGA 缩放图不再用于检测（其非等比拉伸不符合「长边 640 + 黑边」要求）。
-            det_frame = frame
-            frame_orig = None  # 预览直接复用工作帧(544x960)，无需再反算到 1920x1080
-
+            # 实时 RGA 路径：检测吃 RGA 等比缩放图(640x360)，补黑边后坐标归一化映射回预览(1280x720)，
+            # 全程在 _extract_frame_metrics_norm 内完成（省 Python 侧 letterbox 预处理）。
             now = time.time()
             try:
-                fd = self.analyzer._extract_frame_metrics(
-                    det_frame, fidx, frame_orig=frame_orig, ts=now)
+                fd = self.analyzer._extract_frame_metrics_norm(
+                    det360=scale, preview=frame, frame_idx=fidx, ts=now)
             except Exception as e:
                 # 推理异常（输入异常/NPU 资源异常）不中断分析线程，记日志后跳过本帧
                 logger.error("帧 %d 特征提取失败（%s: %s），跳过本帧",
@@ -126,7 +130,12 @@ class InferenceManage(ThreadBase):
             # 仅在识别激活时（/start 后）喂给 segmenter；打开摄像头后即使未开始运动，
             # 仍持续做帧提取 + 更新 latest_preview_frame，保证 Qt 端能立刻看到预览。
             if self.recognition_active and self.segmenter is not None:
-                seg = self.segmenter.feed(fd)
+                seg_res = self.segmenter.feed(fd)
+                # 实时投篮计数直接镜像 FSM（进入 OVERHEAD_RELEASE 即 +1），
+                # 与离线 export_features 口径一致；has_squat 不再是计数门禁，
+                # 避免站姿投篮（膝角未下到阈值）被误吞导致 QT 端计数不动。
+                self.shot_count = seg_res.get('shot_count', self.shot_count)
+                seg = seg_res.get('shot_event')
                 if seg is not None:
                     self._on_shot(seg, now)
 
@@ -136,17 +145,18 @@ class InferenceManage(ThreadBase):
     # 逐投篮处理
     # ------------------------------------------------------------------
     def _on_shot(self, seg, now):
+        # 计数已由 _run() 镜像 FSM（进入 OVERHEAD_RELEASE 即 +1），此处不再递增，
+        # 避免双计。has_squat 降级为评分提示项（方案 A）：无充分下蹲也计数、也出报告，
+        # knee_power 因屈膝幅度不足自然偏低，不再作为丢弃整段的门禁。
         if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:
             logger.warning("实时丢弃过短段: 起点=%d, 出手=%d, 段长=%d < %d",
                            seg['start_idx'], seg['release_idx'],
                            len(seg['frame_metrics']), Config.MIN_SHOT_FRAMES)
             return
         if not seg.get('has_squat'):
-            logger.warning("实时丢弃无真实下蹲误检段: 起点=%d, 出手=%d, 段长=%d",
-                           seg['start_idx'], seg['release_idx'],
-                           len(seg['frame_metrics']))
-            return
-        self.shot_count += 1
+            logger.info("第 %d 投未检测到充分下蹲（屈膝发力评分将偏低）: 起点=%d, 出手=%d, 段长=%d",
+                        seg.get('shot_idx'), seg['start_idx'], seg['release_idx'],
+                        len(seg['frame_metrics']))
         self.last_action_ts = now
         try:
             shot = self._score_segment(seg)
@@ -189,6 +199,7 @@ class InferenceManage(ThreadBase):
             "start_idx": seg['start_idx'],
             "release_idx": seg['release_idx'],
             "idx_squat": idx_squat,
+            "has_squat": seg.get('has_squat', False),
             "start_time": seg.get('start_time'),
             "end_time": seg.get('end_time'),
             "duration": seg.get('duration'),

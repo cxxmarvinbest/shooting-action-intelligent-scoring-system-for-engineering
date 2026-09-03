@@ -53,7 +53,7 @@ class RecordingManage:
                                 time.strftime("rec_%Y%m%d_%H%M%S.mp4"))
             writer = cv2.VideoWriter(
                 path, cv2.VideoWriter_fourcc(*"mp4v"), 30.0,
-                (Config.CAMERA_WIDTH, Config.CAMERA_HEIGHT))
+                (Config.PREVIEW_WIDTH, Config.PREVIEW_HEIGHT))
             if not writer.isOpened():
                 logger.error("录制器打开失败: %s", path)
                 return None, None

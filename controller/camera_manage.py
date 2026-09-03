@@ -37,8 +37,7 @@ from config import Config
 from common.thread_base import ThreadBase
 from common.exceptions import RtspStreamError
 from controller.recording_manage import RecordingManage
-from vision_algorithm.mpp.mpp_config import (
-    USE_MPP_DECODE, MPP_DISPLAY_W, MPP_DISPLAY_H)
+from vision_algorithm.mpp.mpp_config import USE_MPP_DECODE
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -60,7 +59,7 @@ class CameraManage(ThreadBase):
         self.lock = threading.RLock()
         self.state = "closed"          # closed / opened / recording / paused / stopped / running / error
         self._latest_frame = None      # 原始大图（预览/录制）
-        self._latest_scale = None      # RGA 缩放图（640x640，供检测）
+        self._latest_scale = None      # RGA 缩放图（640x360，供检测，Python 侧补黑边到 640x640）
         self.latest_idx = 0
         self._recent_frames = deque(maxlen=10)  # 最近 N 帧缓存（供 /frames 取多帧）
 
@@ -118,9 +117,10 @@ class CameraManage(ThreadBase):
                 return
 
     def _run_mpp(self):
+        # 预览/录像输出统一 1280x720（RGA 显示输出）；RGA 缩放图 640x360 供检测（见 mpp_config）
         frames = self.analyzer._iter_rtsp_frames(
             Config.CAMERA_RTSP_URL,
-            MPP_DISPLAY_W, MPP_DISPLAY_H)
+            Config.PREVIEW_WIDTH, Config.PREVIEW_HEIGHT)
         for frame, scale in frames:
             if self.is_stopped():
                 break
@@ -227,9 +227,19 @@ class CameraManage(ThreadBase):
             return self._latest_frame
 
     def latest_scale(self):
-        """返回最新 RGA 缩放图（640x640，供检测）。"""
+        """返回最新 RGA 缩放图（640x360，供检测）。"""
         with self.lock:
             return self._latest_scale
+
+    def latest_pair(self):
+        """原子返回 (frame, scale, idx)：一次锁内取「同一解码帧」的预览图与 RGA 缩放图。
+
+        实时推理若分别调 latest() / latest_scale() 会两次分别加锁，可能取到
+        「第 N 帧预览 + 第 N+1 帧缩放图」，导致检测坐标与预览画面错位（最高风险点）。
+        此处单锁返回同一帧的 (预览帧, 缩放图, 帧号)，供推理线程一次取齐。
+        """
+        with self.lock:
+            return self._latest_frame, self._latest_scale, self.latest_idx
 
     def recent_frames(self, n=1):
         """返回最近 n 帧（按时间升序）；n<=0 返回空列表。"""

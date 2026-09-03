@@ -319,11 +319,14 @@ class HttpManage(ThreadBase):
             ankle_val = meta.get("ankle_angle")
             if ankle_val is None:
                 ankle_val = 0.0
+            # 肩/肘/髋/膝关键点不可见时角度为 None，透传 None 给客户端（Qt 侧显示 '-'）
+            def _f(v):
+                return round(float(v), 2) if v is not None else None
             angles = {
-                "shoulder": round(float(shoulder), 2),
-                "elbow": round(float(elbow), 2),
-                "hip": round(float(hip), 2),
-                "knee": round(float(knee), 2),
+                "shoulder": _f(shoulder),
+                "elbow": _f(elbow),
+                "hip": _f(hip),
+                "knee": _f(knee),
                 "ankle": round(float(ankle_val), 2),
             }
 

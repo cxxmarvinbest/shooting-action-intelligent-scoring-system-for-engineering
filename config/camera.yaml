@@ -3,7 +3,20 @@ CAMERA_IP: "192.168.8.89"
 CAMERA_USER: "admin"
 CAMERA_PASSWORD: "siboasi123"
 CAMERA_RTSP_URL: "rtsp://admin:siboasi123@192.168.8.89:554/h264/ch1/main/av_stream"
-CAMERA_WIDTH: 1920        # 高速摄像头输出宽
-CAMERA_HEIGHT: 1080       # 高速摄像头输出高
+CAMERA_WIDTH: 1920        # RTSP 源分辨率宽（仅文档语义，实时链路不再直接使用）
+CAMERA_HEIGHT: 1080       # RTSP 源分辨率高（仅文档语义，实时链路不再直接使用）
+CAMERA_FPS: 25            # 摄像头真实出流帧率（海康 RTSP 主码流实测 25fps）
+                          # 评分模块的时长/角速度换算、RTSP 实时流时间戳换算均以此为口径
+                          # 禁止在代码里硬编码帧率（原 video_analyzer 硬编码 30.0 已移除）
+# 预览/录像输出分辨率（RGA 显示输出统一 1280x720，降低编码与磁盘 IO 开销）
+# 该尺寸为实时链路的「单一来源」：camera_manage 拉流、video_analyzer 坐标映射、
+# recording_manage 录像写入三处均引用它，禁止在别处写死 1280/720。
+PREVIEW_WIDTH: 1280
+PREVIEW_HEIGHT: 720
+# 姿态子图保存调试（方案 B 排查姿态精度用）：开启后把姿态 crop 子图落盘保存
+SAVE_POSE_CROP: false
+# 带骨架版姿态子图（叠加关键点/骨架连线），独立开关，便于与纯图对比
+SAVE_POSE_CROP_SKEL: false
+POSE_CROP_DIR: "data/output/pose_crop"
 # 是否在本地终端弹窗预览实时画面（工位测试用；RK3588 无 GUI 环境代码会自动关闭不报错）
 SHOW_PREVIEW: true

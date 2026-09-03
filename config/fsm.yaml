@@ -1,0 +1,93 @@
+# fsm.yaml —— 投篮 4 态有限状态机（FSM）默认参数
+# ============================================================
+# 阶段 2 重构：由「6 态串行」改为「4 态串行」。
+# 依据：逐帧观察标准投篮动作（shot_2 等）发现，真实动作存在时间重叠——
+#   下蹲（下肢）与上举（上肢）并行推进，而非先后串行。
+# 因此合并重叠区间：
+#   HOLD(持球) -> SQUAT_RAISE(下蹲+上举并行段) -> OVERHEAD_RELEASE(过顶+出手) -> FOLLOW(跟随)
+#
+# 约束：
+#   1. 距离/高度类阈值均已归一化（除以 torso_len 肩髋欧氏距离），禁止直接使用像素绝对值。
+#   2. 角度阈值单位为「度」，斜率单位为「度/帧」或「归一化值/帧」。
+#   3. 坐标约定：图像坐标系 y 向下为正；所有「相对高度」的正值均表示「上方」。
+#      例如 wrist_rel_head > 0 表示手腕在眼睛/鼻子之上（图像 y 更小）。
+#   4. 速度阈值均为「正数幅值」：下降速度指 y 值增加的速度，上升速度指 y 值减小的速度。
+#   5. 所有 bool 型标志与帧数均为阶段 2 初始值，后续只改数值不改结构。
+
+FSM:
+  # ── 状态集合（顺序即合法时序链）──
+  # IDLE（待机）是起始/作废后的复位态，不计入「4 态动作链」。
+  STATES:
+    - IDLE               # 待机：未持球 / 动作链作废后
+    - HOLD               # 持球：球贴腕、肘屈，尚未启动
+    - SQUAT_RAISE        # 下蹲+上举：下肢屈膝下蹲与上肢上举并行（吸收原 SQUAT/EXTEND/ELBOW_UP）
+    - OVERHEAD_RELEASE   # 过顶+出手：手过头到球离手（吸收原 OVERHEAD/RELEASE）
+    - FOLLOW             # 跟随：球出手后手臂回落
+
+  # ── 合法跳转矩阵（邻接表：from -> [合法 to]）──
+  # 未列出的跳转一律非法。4 态下不再有 illegal_jump 的「下蹲中手过顶=跳级」误判，
+  # 因为 SQUAT_RAISE 本就同时包含下肢下蹲与上肢上举。
+  TRANSITIONS:
+    IDLE:             [HOLD]
+    HOLD:             [SQUAT_RAISE]
+    SQUAT_RAISE:      [OVERHEAD_RELEASE]
+    OVERHEAD_RELEASE: [FOLLOW]
+    FOLLOW:           [IDLE]
+
+  # ── 全局参数 ──
+  GLOBAL:
+    hysteresis_frames: 3          # 默认迟滞：连续 N 帧满足下一态进入条件才切换（抗关键点抖动）
+    cooldown_frames: 20           # 球出手后冷却帧数，防止同一动作重复触发投篮事件
+    slope_window: 5               # 斜率（角速度/位移速度）滑动窗口帧数（线性拟合）
+    hold_timeout_frames: 90       # 持球后超时未启动 -> 作废回待机
+    follow_timeout_frames: 40     # 跟随态超时未回待机 -> 强制回待机
+    overhead_timeout_frames: 30   # 过顶+出手态超时未判出手 -> 用手过顶帧兜底切段（vis=0 判不出出手也不丢计数）
+    detect_lost_reset_frames: 150 # 连续无人且无球帧数阈值 -> 强制回 IDLE（防 OVERHEAD/SQUAT_RAISE 无超时兜底卡死）
+    torso_min_px: 10.0            # torso_len 最小像素（防止归一化除数过小）
+    ball_conf_min: 0.25           # 篮球检测置信度下限（低于此值视为该帧无球）
+    require_full_chain: false     # 投篮判定不要求走到 FOLLOW；走完 HOLD->SQUAT_RAISE->OVERHEAD_RELEASE 三态即计数（FOLLOW 仅作缓冲）
+
+  # ── 持球 HOLD ──
+  # 进入条件：球贴腕（球框四边界覆盖腕点 或 球心-腕归一化距离 < 阈值）+ 肘关节弯曲（辅助）
+  # 维持条件：球持续贴腕
+  # 退出条件：进入下蹲+上举（膝角下降 或 腕相对头高度上升）
+  HOLD:
+    ball_wrist_dist_ratio: 0.40     # 球心-腕欧氏距离 ÷ torso_len 阈值，小于此值判为贴腕（0.30→0.40：四标准动作 HOLD 期 dist 均值 0.29~0.33、max 0.50）
+    require_intersect: false        # 是否要求球框四边界覆盖腕点（false：真实持球时球框常不覆盖腕点，intersect 占比仅 30~96%，靠距离阈值即可）
+    elbow_flex_max: 180.0           # 肘关节弯曲上限（°），辅助确认抱球姿态（120→180：兼容低位直臂持球 129~178°，肘角物理上限即 180，等效关掉肘角一票否决；球贴腕为主判据）
+    wrist_below_shoulder: true      # 是否要求腕点 y 值大于肩点 y 值（即腕在肩下方）
+
+  # ── 下蹲+上举 SQUAT_RAISE ──
+  # 进入条件：膝角 < 阈值 或 膝角快速下降 或 腕相对头高度开始上升（上肢启动上举）
+  # 维持条件：膝角保持低位/回升，或腕持续上举
+  # 退出条件：腕越过头部（手过顶）
+  SQUAT_RAISE:
+    knee_squat_thr: 140.0          # 膝角 < 此值判为屈膝下蹲（°）（135→165：兼容站姿微屈浅下蹲 155~179；代价是站姿膝角波动 148~155 也可能误判下蹲，浅蹲辨识度下降，靠 wrist_rise_vel_thr 上举兜底）
+    knee_drop_vel_thr: 2.0         # 膝角下降速度幅值阈值（°/帧）
+    wrist_rise_vel_thr: 0.03       # 腕相对头高度上升速度幅值阈值（torso_len/帧），辅助判定上举启动
+    hip_drop_vel_thr: 0.5          # 髋部下降速度幅值阈值（torso_len/帧）
+
+  # ── 过顶+出手 OVERHEAD_RELEASE ──
+  # 进入条件：仅腕高于头（手过顶）；球是否离手不在进入时判定
+  # 计数判定：进入本态即判为一次投篮（走完 HOLD->SQUAT_RAISE->OVERHEAD_RELEASE 三态）
+  # 退出条件：球腕分离（球出手）确认，或超时兜底（vis=0 判不出出手）-> 进入 FOLLOW 缓冲
+  OVERHEAD_RELEASE:
+    hysteresis_frames: 2           # 进入迟滞：连续 2 帧手过顶即进入（默认 3；快速出手时过顶信号易被单帧回落打断，单独放宽到 2 更抗打断）
+    wrist_above_head: 0.0          # 腕相对头高度 ÷ torso_len，> 此值视为手过头
+    ball_rise_vel_thr: 0.15        # 球框抛射判据：球中心 cy 上升速度 ÷ torso_len/帧，≥ 此值判为球离手（不依赖腕点，腕点整帧丢失时仍能判出手）
+    ball_wrist_sep_vel_thr: 0.10   # 球腕距离变化率 ÷ torso_len/帧，≥ 此值判为球离手（腕点可见时斜率判据）
+    ball_wrist_sep_ratio: 0.80     # 球腕距离 ÷ torso_len ≥ 此值兜底判为离手（含补旧帧：腕点丢时用最近有效腕点补算距离）
+    elbow_extend_vel_thr: 5.0      # 肘角伸直速度阈值（°/帧），辅助判出手（甩臂出手时肘角快速伸直）
+    elbow_extend_ang: 140.0        # 肘角接近伸直阈值（°），配合肘角伸直速度判定
+    release_confirm_frames: 1      # 球腕分离需连续 N 帧确认（1：多判据已含斜率抗抖，单帧确认更快捕捉出手）
+
+  # ── 跟随 FOLLOW ──
+  # 进入条件：球腕分离（球出手）
+  # 维持条件：手臂保持过顶回落过程
+  # 退出条件：手臂回落到头下（跟随结束）或 超时 -> 回待机
+  FOLLOW:
+    wrist_drop_below: -0.3         # 腕相对头高度回落至此值以下（÷torso_len）视为跟随结束
+
+  # ── 动作作废/回退检测（可选的显式中断信号）──
+  # 4 态下重叠区间已合并，串行误判消除；此处保留结构供后续细化。
+  INTERRUPTS: {}

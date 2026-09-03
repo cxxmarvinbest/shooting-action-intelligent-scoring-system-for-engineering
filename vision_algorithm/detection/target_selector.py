@@ -61,7 +61,8 @@ class TargetSelector:
         参数：dets —— RKNNDetModel.detect 返回的列表
               player_box —— 主球员框 (x1,y1,x2,y2)，可为 None
               frame_w —— 画面宽度
-        返回：篮球框列表（按置信度降序后至多保留 1 个）
+        返回：[{'box': (x1,y1,x2,y2), 'conf': float}] 列表
+               （按置信度降序后至多保留 1 个；conf 供阶段 0 持球/出手判定加权）
         """
         ball_cls_id = Config.get("DET_BALL_CLS_ID", 1)
         balls = []
@@ -82,7 +83,8 @@ class TargetSelector:
                 ball_cy = (by1 + by2) / 2
                 if ball_cy > py2 + 10:
                     continue
-            balls.append(d['box'])
+            # 保留置信度：阶段 0 需要 ball_conf 做持球/出手判定加权，不能只留 box
+            balls.append({'box': d['box'], 'conf': float(d.get('conf', 0.0))})
 
         # det 结果已按置信度降序，取首个即最优目标
         return balls[:1]

@@ -18,8 +18,24 @@ POSE_KPT_CONF_THRES: 0.3
 # 姿态模型固定输入尺寸（宽 x 高，均为 32 的整数倍；按实际 rknn 文件导出尺寸填写）
 POSE_MODEL_W: 320
 POSE_MODEL_H: 320
+# 姿态 crop 扩边 margin（像素）：player 框每边向外扩的像素数，防止关键点贴框边被切掉
+POSE_CROP_MARGIN: 10
+
+# ── Anti-flicker 单目标跟踪层（时序稳定主球员框，抑制身份跳变/单帧误检/单帧漏检）──
+ANTI_FLICKER_ENABLE: true     # 总开关（A/B 对比时临时置 false 回退纯面积选择）
+TRACKER_IOU_THRESH: 0.3       # 命中判定 IoU 阈值（候选框 vs 锁定框）
+TRACKER_HANGOVER: 3           # 连续漏检兜底帧数（超过则丢弃重置）
+TRACKER_CONFIRM: 1            # tentative 需连续命中帧数（1=首帧+下一帧续上即锁定）
+TRACKER_EMA_ALPHA: 0.5        # 框中心/宽高 EMA 平滑系数（越大越跟手）
 
 # RK3588 NPU 核心调度模式（默认三核全开，提升检测+姿态并行吞吐）
 # 按位掩码：0=AUTO, 1=CORE0, 2=CORE1, 4=CORE2, 3=CORE0_1, 7=CORE0_1_2
 # 也兼容字符串写法：auto / 0 / 1 / 2 / 0_1 / 0_1_2
 NPU_CORE_MASK: 7
+
+# 检测推理引擎：rknn_lite（Python numpy 后处理） | cpp（C++ 后处理，性能优）
+# 已通过 test/ab_cpp_engine.py A/B 验证（player/ball 召回 100%，IoU 0.988/1.000，
+# 单帧 18.49ms vs lite 35.33ms），统一切 cpp。
+# 注意：cpp 引擎的检测阈值由 C++ 硬编码 0.25（BOX_THRESH），无法对篮球单独放宽，
+#       已 A/B 确认篮球召回 100% 可接受；若后续误检/漏检回退，可临时切回 rknn_lite。
+DET_ENGINE: "cpp"

@@ -67,11 +67,15 @@ class ScoringEngine:
         """按帧序提取指定关节角度序列（与 frame_metrics 逐帧对齐，缺帧用 default 填充）。
 
         idx: 0=肩, 1=肘, 2=髋, 3=膝
+        角度元素为 None（关键点不可见，pose_feature 已不再兜底 180）时，同样用 default 填充，
+        避免 None 被 np.asarray 转成 nan 污染后续平滑/峰值检测。
         """
-        return np.array([
-            m['angles'][idx] if (m.get('angles') is not None) else default
-            for m in frame_metrics
-        ], dtype=float)
+        def _val(m):
+            if m.get('angles') is None:
+                return default
+            v = m['angles'][idx]
+            return default if v is None else v
+        return np.array([_val(m) for m in frame_metrics], dtype=float)
 
     @staticmethod
     def _aligned_hip_y(frame_metrics):
@@ -259,7 +263,9 @@ class ScoringEngine:
         for i, m in enumerate(frame_metrics):
             if (m.get('angles') is not None and m.get('wrist_y') is not None
                     and m.get('shoulder_y') is not None):
-                if m['wrist_y'] < m['shoulder_y'] and m['angles'][1] > 140:
+                elbow_ang = m['angles'][1]
+                # 肘角为 None（关键点不可见）时不判定出手，避免 None 参与比较抛异常
+                if elbow_ang is not None and m['wrist_y'] < m['shoulder_y'] and elbow_ang > 140:
                     release_idx = i
                     break
         if release_idx is not None:

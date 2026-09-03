@@ -32,9 +32,10 @@ from vision_algorithm.mpp.mpp_config import (
     USE_MPP_DECODE, MPP_DISPLAY_W, MPP_DISPLAY_H, MPP_QUEUE_SIZE,
     MPP_SCALE_ENABLED, MPP_SCALE_W, MPP_SCALE_H,
     AUTO_TRANSCODE_H265, FFMPEG_BIN, FFPROBE_BIN)
-from vision_algorithm.segmentation.shot_segmenter import ShotSegmenter
+from vision_algorithm.segmentation.shot_fsm import ShotFSM
 from vision_algorithm.detection.det_model import RKNNDetModel
 from vision_algorithm.detection.target_selector import TargetSelector
+from vision_algorithm.detection.single_target_tracker import SingleTargetTracker
 from vision_algorithm.pose.pose_model import RKNNPoseModel
 from vision_algorithm.pose.pose_feature import SKELETON_CONNECTIONS, extract_pose_features
 
@@ -51,27 +52,63 @@ class VideoAnalyzer:
 
     def __init__(self):
         self.det_model = None    # RKNN 目标检测模型
+        self.det_engine = None   # 检测引擎类型: "rknn_lite" | "cpp"（load_models 时确定）
         self.pose_model = None   # RKNN 姿态估计模型
-        self.current_fps = 30.0  # 最近一次处理视频的「有效帧率」（= 真实帧率 / 采样步长，供评分用）
-        self.video_fps = 30.0    # 最近一次处理视频的「真实帧率」（供 ts 时间戳换算用）
+        self.current_fps = float(Config.get("CAMERA_FPS", 25.0))  # 最近一次处理视频的「有效帧率」（= 真实帧率 / 采样步长，供评分用）
+        self.video_fps = float(Config.get("CAMERA_FPS", 25.0))    # 最近一次处理视频的「真实帧率」（供 ts 时间戳换算用）
         self.selector = TargetSelector()
+        # Anti-flicker 单目标跟踪层：两条链路各一个独立实例（坐标系不同，不可跨链路共享）。
+        #   离线链路 tracker_off：640x640 画布坐标（检测模型输入坐标系）；
+        #   实时链路 tracker_rt ：检测输出坐标（cpp=640x360 / rknn_lite=640x640 画布），
+        #                          frame_size 在 update 时按引擎动态传入。
+        self._tracker_enable = bool(Config.get("ANTI_FLICKER_ENABLE", True))
+        _iou = float(Config.get("TRACKER_IOU_THRESH", 0.3))
+        _hang = int(Config.get("TRACKER_HANGOVER", 3))
+        _conf = int(Config.get("TRACKER_CONFIRM", 1))
+        _alpha = float(Config.get("TRACKER_EMA_ALPHA", 0.5))
+        self._tracker_off = SingleTargetTracker(
+            iou_thresh=_iou, hangover=_hang, confirm=_conf,
+            ema_alpha=_alpha, frame_size=(640, 640))
+        self._tracker_rt = SingleTargetTracker(
+            iou_thresh=_iou, hangover=_hang, confirm=_conf, ema_alpha=_alpha)
         # 最新干净帧（无骨架叠加）+ 对应 AI 识别元数据（供 HTTP /frames 下发）
         self.last_preview_frame = None
         self.last_frame_metrics = None
+        # 姿态子图保存调试开关（排查姿态精度用，默认关闭；SAVE_POSE_CROP 见 camera.yaml）
+        # 注意：不能与方法 _save_pose_crop 同名，否则实例属性会遮蔽方法导致调用报错
+        self._save_pose_crop_enabled = bool(Config.get("SAVE_POSE_CROP", False))
+        # 注意：属性不能与方法 _save_pose_crop_skel 同名（会遮蔽方法，报 bool not callable）
+        self._save_pose_crop_skel_enabled = bool(Config.get("SAVE_POSE_CROP_SKEL", False))
+        self._pose_crop_save_cnt = 0
 
     def load_models(self):
-        """加载 RKNN 检测模型（640x640）与姿态估计模型（320x320）。"""
-        logger.info("加载检测模型: %s", Config.DET_RKNN_PATH)
-        logger.info("加载姿态模型: %s", Config.POSE_RKNN_PATH)
+        """加载 RKNN 检测模型（640x640）与姿态估计模型（320x320）。
+
+        检测引擎由 DET_ENGINE 决定：
+          - rknn_lite：Python numpy 后处理（默认，保守，已验证）
+          - cpp      ：C++ 后处理（性能优，需 .so 已部署，A/B 验证后启用）
+        """
         core_mask = Config.get("NPU_CORE_MASK", 7)
+        det_engine = str(Config.get("DET_ENGINE", "rknn_lite")).strip().lower()
+        self.det_engine = det_engine
+        logger.info("检测引擎: %s", det_engine)
+        logger.info("加载姿态模型: %s", Config.POSE_RKNN_PATH)
         logger.info("NPU 核心调度模式: %s", core_mask)
-        self.det_model = RKNNDetModel(
-            Config.DET_RKNN_PATH,
-            conf_thres=Config.DET_CONF_THRES,
-            nms_thres=Config.DET_NMS_THRES,
-            ball_conf_thres=Config.get("DET_BALL_CONF_THRES", 0.30),
-            model_w=640, model_h=640,
-            core_mask=core_mask)
+
+        if det_engine == "cpp":
+            logger.info("加载 C++ 检测模型: %s", Config.DET_RKNN_PATH)
+            from vision_algorithm.detection.cpp_det_model import CppDetModel
+            self.det_model = CppDetModel(Config.DET_RKNN_PATH, core_mask=core_mask)
+        else:
+            logger.info("加载检测模型(rknn_lite): %s", Config.DET_RKNN_PATH)
+            self.det_model = RKNNDetModel(
+                Config.DET_RKNN_PATH,
+                conf_thres=Config.DET_CONF_THRES,
+                nms_thres=Config.DET_NMS_THRES,
+                ball_conf_thres=Config.get("DET_BALL_CONF_THRES", 0.30),
+                model_w=640, model_h=640,
+                core_mask=core_mask)
+
         self.pose_model = RKNNPoseModel(
             Config.POSE_RKNN_PATH,
             conf_thres=Config.POSE_CONF_THRES,
@@ -91,6 +128,15 @@ class VideoAnalyzer:
                     logger.warning("释放 RKNN 模型失败（%s: %s）", type(e).__name__, e)
         self.det_model = None
         self.pose_model = None
+
+    def reset_trackers(self):
+        """重置两条链路的跟踪器到「无目标」状态。
+
+        调用时机：切换视频（离线）/ 实时运动会话开始（/start）时，
+        避免上一段视频/会话残留的锁定框污染新目标。
+        """
+        self._tracker_off.reset()
+        self._tracker_rt.reset()
 
     # ============================================================
     # H265 摄像头录制视频 -> 自动转码为 H264 预处理
@@ -278,14 +324,14 @@ class VideoAnalyzer:
         logger.info("MPP 硬解处理 H265 多投篮视频: %s (fps=%.1f, 采样步长=%d)",
                     os.path.basename(video_path), fps, stride)
 
-        segmenter = ShotSegmenter()
+        segmenter = ShotFSM()
         shots = []
 
         for frame_idx, frame in self._iter_mpp_frames(video_path):
             if frame_idx % stride != 0:
                 continue
             fd = self._extract_frame_metrics(frame, frame_idx, ts=frame_idx / fps)
-            seg = segmenter.feed(fd)
+            seg = segmenter.feed(fd).get('shot_event')
             if seg is None:
                 continue
             if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:
@@ -442,8 +488,8 @@ class VideoAnalyzer:
 
         threading.Thread(target=_play, daemon=True).start()
 
-        # RTSP 流帧率（评分模块 fps 参数用）；如需精确可读 player.get_width/get_height
-        self.current_fps = 30.0
+        # RTSP 流帧率（评分模块 fps 参数用）：统一取 camera.yaml 的 CAMERA_FPS（实测 25fps）
+        self.current_fps = float(Config.get("CAMERA_FPS", 25.0))
 
         try:
             while state['alive']:
@@ -480,6 +526,9 @@ class VideoAnalyzer:
         返回（与原版接口一致）：
             (s1, s2, out1_path, out2_path, rel_height, frame_metrics)
         """
+        # 0. 重置跟踪器（切换视频必须重置，避免残留锁定框污染新视频主球员）
+        self._tracker_off.reset()
+
         # 1. 读取视频（本地文件，软解）
         #    H265 摄像头录制视频先自动转码为 H264，避免软解打不开/花屏。
         #    RTSP 流硬解：改用上面 _iter_rtsp_frames(rtsp_url) 生成器替代下面
@@ -619,7 +668,7 @@ class VideoAnalyzer:
         # 每帧时间戳：实时由调用方传墙钟 epoch 秒；离线缺省按 帧号/真实帧率 推算
         # 「视频内相对时间」（秒）。两种语义由 shot_segmenter.format_shot_time 自动区分。
         if ts is None:
-            fps = getattr(self, 'video_fps', 30.0) or 30.0
+            fps = getattr(self, 'video_fps', None) or float(Config.get("CAMERA_FPS", 25.0))
             ts = frame_idx / fps if fps > 0 else 0.0
 
         # 工作帧 = 原图（不做竖幅裁剪）
@@ -634,8 +683,13 @@ class VideoAnalyzer:
         dets = self.det_model.detect_on_canvas(canvas)
 
         # 3) 只取主球员框（640x640 画布坐标）
+        #    Anti-flicker：跟踪器时序稳定主球员框（替代纯面积最大），抑制身份跳变/
+        #    单帧误检/单帧漏检；关闭时回退原纯面积选择（A/B 对比用）。
         player_cls = Config.get("DET_PLAYER_CLS_ID", 0)
-        player_box_640 = self.selector.select_main_player_box(dets, player_cls)
+        if self._tracker_enable:
+            player_box_640, _ = self._tracker_off.update_from_dets(dets, player_cls)
+        else:
+            player_box_640 = self.selector.select_main_player_box(dets, player_cls)
 
         # 640x640 画布坐标 -> 原图坐标（反 letterbox：去黑边 + 反缩放）
         def box_to_orig(b640):
@@ -645,16 +699,14 @@ class VideoAnalyzer:
             y2 = (b640[3] - dh) / scale
             return (x1, y1, x2, y2)
 
-        # 4) 姿态估计：从【原图】按 player 框抠 ROI -> 保持宽高比 letterbox 320x320 -> pose
+        # 4) 姿态估计：从【原图】按 player 框抠 ROI（每边向外扩 margin）-> 保持宽高比 letterbox 320x320 -> pose
         poses = []
         crop_x1 = crop_y1 = 0
         if player_box_640 is not None:
             fx1, fy1, fx2, fy2 = box_to_orig(player_box_640)
-            crop_x1 = max(0, int(round(fx1)))
-            crop_y1 = max(0, int(round(fy1)))
-            crop_x2 = min(width - 1, int(round(fx2)))
-            crop_y2 = min(work.shape[0] - 1, int(round(fy2)))
-            crop = work[crop_y1:crop_y2, crop_x1:crop_x2]
+            margin = int(Config.get("POSE_CROP_MARGIN", 10))
+            crop, crop_x1, crop_y1 = self._crop_with_margin(
+                (fx1, fy1, fx2, fy2), work, margin)
             if crop.size > 0 and crop.shape[0] >= 8 and crop.shape[1] >= 8:
                 poses = self.pose_model.detect_crop(crop)
 
@@ -668,7 +720,9 @@ class VideoAnalyzer:
         # 篮球筛选（cls==DET_BALL_CLS_ID，长宽比/尺寸/位置约束）
         dets_orig = [{'box': tuple(int(round(v)) for v in box_to_orig(d['box'])),
                       'cls': d['cls'], 'conf': d['conf']} for d in dets]
-        ball_boxes = self.selector.filter_balls(dets_orig, player_box, width)
+        ball_objs = self.selector.filter_balls(dets_orig, player_box, width)
+        ball_boxes = [o['box'] for o in ball_objs]
+        ball_confs = [o['conf'] for o in ball_objs]
 
         # 5) 关键点：pose 裁剪图坐标 -> 原图坐标（加裁剪偏移即可）
         main_kpts = None
@@ -690,11 +744,12 @@ class VideoAnalyzer:
         current_data = {
             'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
             'kpt_conf': kpt_conf, 'ankle_angle': None,
-            'cx1': 0, 'cy1': 0, 'player_box': player_box, 'ball_boxes': ball_boxes
+            'cx1': 0, 'cy1': 0, 'player_box': player_box,
+            'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }
 
         # 区分左右侧并计算关节角度等特征（基于原图坐标，角度/相对值不受缩放影响）
-        pose_feat = extract_pose_features(main_kpts, player_box)
+        pose_feat = extract_pose_features(main_kpts, player_box, kpt_conf)
         current_data.update(pose_feat)
 
         # 节流诊断：每 30 帧打印一次球/手腕/持球距离，排查「识别不到投篮」
@@ -729,6 +784,227 @@ class VideoAnalyzer:
 
         return current_data
 
+    def _extract_frame_metrics_norm(self, det360, preview, frame_idx, ts=None):
+        """实时 RGA 路径（方案 B）：检测输入为 RGA 等比缩放的 640x360，
+        上下补黑边到 640x640 后检测，坐标归一化映射回预览(1280x720)。
+
+        与离线 _extract_frame_metrics 的坐标链路差异（本方法只服务实时 RTSP 流）：
+          - 检测输入 det360 是 RGA 等比缩放的 640x360（无畸变），跳过 resize；
+          - 检测引擎分支（DET_ENGINE）：
+              cpp      ：det360 直接喂 C++ 引擎，内部自动 letterbox 补边，返回 640x360 坐标；
+              rknn_lite：det360 上下补黑边到 640x640 再检测，返回 640x640 画布坐标；
+          - 坐标映射统一为「检测画布坐标 -> 归一化(÷src_w,÷src_h) -> 预览(×pw,×ph)」，
+            rknn_lite 分支在归一化前多一步减黑边(dw,dh)；640x360 与 1280x720 等比，SX=SY=2.0；
+          - 姿态抠图基准为 preview(1280x720)，输出坐标同为预览坐标。
+
+        参数：
+            det360    —— RGA 等比缩放的 640x360 BGR 图（检测输入）
+            preview   —— MPP 显示输出的 1280x720 BGR 图（预览/录像/姿态抠图基准）
+            frame_idx —— 帧号
+            ts        —— 该帧时间戳（实时=墙钟 epoch 秒；缺省按 帧号/帧率 推算）
+        """
+        if ts is None:
+            fps = getattr(self, 'video_fps', None) or float(Config.get("CAMERA_FPS", 25.0))
+            ts = frame_idx / fps if fps > 0 else 0.0
+
+        pw = int(Config.PREVIEW_WIDTH)
+        ph = int(Config.PREVIEW_HEIGHT)
+        src_h, src_w = det360.shape[:2]
+
+        # 1) 检测：按引擎分支处理（DET_ENGINE）
+        #    - cpp      ：det360 直接喂 C++ 引擎，内部自动 letterbox 补边到 640x640，
+        #                返回「640x360 输入图坐标」，无需 Python 预补边；
+        #    - rknn_lite：det360 上下补黑边到 640x640 再 detect_on_canvas，
+        #                返回「640x640 画布坐标」，需反算（减 dw/dh）。
+        if self.det_engine == "cpp":
+            dets = self.det_model.detect_360(det360)
+            # 640x360 输入图坐标 -> 归一化 -> 预览坐标（无补边，纯等比缩放）
+            def to_preview(b):
+                return (b[0] / src_w * pw, b[1] / src_h * ph,
+                        b[2] / src_w * pw, b[3] / src_h * ph)
+        else:
+            mw = self.det_model.model_w   # 640
+            mh = self.det_model.model_h   # 640
+            dw = (mw - src_w) // 2        # 左右补边（src_w=640 -> dw=0）
+            dh = (mh - src_h) // 2        # 上下补边（src_h=360 -> dh=140）
+            canvas = cv2.copyMakeBorder(
+                det360, dh, dh, dw, dw, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            dets = self.det_model.detect_on_canvas(canvas)
+            # 640x640 画布坐标 -> 640x360 坐标 -> 归一化 -> 预览坐标（letterbox 反算）
+            def to_preview(b640):
+                nx1 = (b640[0] - dw) / src_w
+                ny1 = (b640[1] - dh) / src_h
+                nx2 = (b640[2] - dw) / src_w
+                ny2 = (b640[3] - dh) / src_h
+                return (nx1 * pw, ny1 * ph, nx2 * pw, ny2 * ph)
+
+        # 2) 主球员框（检测画布坐标 -> 预览坐标）
+        #    Anti-flicker：跟踪器时序稳定（坐标系=检测输出坐标系，随 det_engine 变化），
+        #    外推 clamp 用对应画面尺寸；关闭时回退纯面积选择（A/B 对比用）。
+        player_cls = Config.get("DET_PLAYER_CLS_ID", 0)
+        if self._tracker_enable:
+            cands = self._tracker_rt.extract_player_candidates(dets, player_cls)
+            if self.det_engine == "cpp":
+                fw, fh = src_w, src_h          # cpp 返回 640x360 输入图坐标
+            else:
+                fw, fh = self.det_model.model_w, self.det_model.model_h  # lite 返回 640x640 画布坐标
+            player_box_det, _ = self._tracker_rt.update(cands, frame_size=(fw, fh))
+        else:
+            player_box_det = self.selector.select_main_player_box(dets, player_cls)
+
+        # 3) 姿态：从 preview 按 player 框抠 ROI（每边向外扩 margin，防关键点被切掉）-> letterbox 320 -> pose
+        poses = []
+        crop_x1 = crop_y1 = 0
+        if player_box_det is not None:
+            fx1, fy1, fx2, fy2 = to_preview(player_box_det)
+            margin = int(Config.get("POSE_CROP_MARGIN", 10))
+            crop, crop_x1, crop_y1 = self._crop_with_margin(
+                (fx1, fy1, fx2, fy2), preview, margin)
+
+            # 子图保存节流：两种开关任一开启时每 5 帧保存一次，保证纯图与带骨架图同帧落盘
+            save_this_frame = False
+            if (self._save_pose_crop_enabled or self._save_pose_crop_skel_enabled) and crop.size > 0:
+                self._pose_crop_save_cnt += 1
+                save_this_frame = (self._pose_crop_save_cnt % 5 == 1)
+
+            # 纯图像子图落盘（SAVE_POSE_CROP 开启）
+            if save_this_frame and self._save_pose_crop_enabled:
+                self._save_pose_crop(crop, frame_idx)
+
+            if crop.size > 0 and crop.shape[0] >= 8 and crop.shape[1] >= 8:
+                poses = self.pose_model.detect_crop(crop)
+                # 带骨架子图落盘（SAVE_POSE_CROP_SKEL 开启，需 detect_crop 后拿 kpts）
+                if save_this_frame and self._save_pose_crop_skel_enabled and poses:
+                    best = max(poses, key=lambda p: (p['box'][2] - p['box'][0])
+                               * (p['box'][3] - p['box'][1]))
+                    self._save_pose_crop_skel(crop, best['kpts'], frame_idx)
+
+        # player 框输出（预览坐标，clip 到图像范围内，防止检测框回归越界）
+        player_box = None
+        if player_box_det is not None:
+            px1, py1, px2, py2 = to_preview(player_box_det)
+            px1 = max(0, int(round(px1)))
+            py1 = max(0, int(round(py1)))
+            px2 = min(pw - 1, int(round(px2)))
+            py2 = min(ph - 1, int(round(py2)))
+            if px1 < px2 and py1 < py2:
+                player_box = (px1, py1, px2, py2)
+
+        # 篮球筛选（cls==DET_BALL_CLS_ID；坐标已映射回预览并 clip，长宽比恢复圆形）
+        dets_preview = []
+        for d in dets:
+            bx1, by1, bx2, by2 = to_preview(d['box'])
+            bx1 = max(0, int(round(bx1)))
+            by1 = max(0, int(round(by1)))
+            bx2 = min(pw - 1, int(round(bx2)))
+            by2 = min(ph - 1, int(round(by2)))
+            if bx1 < bx2 and by1 < by2:
+                dets_preview.append({'box': (bx1, by1, bx2, by2),
+                                     'cls': d['cls'], 'conf': d['conf']})
+        ball_objs = self.selector.filter_balls(dets_preview, player_box, pw)
+        ball_boxes = [o['box'] for o in ball_objs]
+        ball_confs = [o['conf'] for o in ball_objs]
+
+        # 4) 关键点：pose 裁剪图坐标 -> 预览坐标（加裁剪偏移 + 越界保护）
+        main_kpts = None
+        kpt_conf = None
+        if poses:
+            best = max(poses, key=lambda p: (p['box'][2] - p['box'][0])
+                       * (p['box'][3] - p['box'][1]))
+            kpts = best['kpts'].copy()          # (17,2) 裁剪图坐标
+            kpt_conf = best.get('kpt_conf')
+            # 不可见点(0,0)保持 0，只对可见点做坐标映射
+            visible = (kpts[:, 0] > 0) | (kpts[:, 1] > 0)
+            kpts[visible, 0] += crop_x1
+            kpts[visible, 1] += crop_y1
+            np.clip(kpts[visible, 0], 0, pw - 1, out=kpts[visible, 0])
+            np.clip(kpts[visible, 1], 0, ph - 1, out=kpts[visible, 1])
+            main_kpts = kpts
+
+        current_data = {
+            'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
+            'kpt_conf': kpt_conf, 'ankle_angle': None,
+            'cx1': 0, 'cy1': 0, 'player_box': player_box,
+            'ball_boxes': ball_boxes, 'ball_confs': ball_confs
+        }
+
+        # 区分左右侧并计算关节角度等特征（基于预览坐标，角度/相对值不受缩放影响）
+        pose_feat = extract_pose_features(main_kpts, player_box, kpt_conf)
+        current_data.update(pose_feat)
+
+        # 保存最新干净帧（1280x720 预览）+ 元数据（坐标与预览一致，供 /frames/raw 下发）
+        self.last_preview_frame = preview
+        self.last_frame_metrics = current_data
+
+        return current_data
+
+    @staticmethod
+    def _crop_with_margin(box, img, margin):
+        """从 img 按 box 抠 ROI，四边向外扩 margin 像素（clip 到图像边界）。
+
+        坐标无关的纯函数：box 与 img 必须同坐标系（实时路径 box 是 preview 1280x720
+        坐标、离线路径 box 是原图 1920x1080 坐标，各自传入对应 img 即可，不做任何缩放假设）。
+
+        参数：
+            box    —— (x1, y1, x2, y2) 浮点坐标，img 坐标系
+            img    —— BGR 图（numpy array）
+            margin —— 每边向外扩的像素数（非负）
+        返回：
+            (crop, crop_x1, crop_y1)
+            crop             —— 抠出的 ROI 子图（box 完全越界时可能为空，调用方需判空）
+            crop_x1, crop_y1 —— ROI 左上角在 img 中的偏移（用于关键点坐标回映射）
+        """
+        h, w = img.shape[:2]
+        x1 = max(0, int(round(box[0])) - margin)
+        y1 = max(0, int(round(box[1])) - margin)
+        x2 = min(w - 1, int(round(box[2])) + margin)
+        y2 = min(h - 1, int(round(box[3])) + margin)
+        crop = img[y1:y2, x1:x2]
+        return crop, x1, y1
+
+    def _save_pose_crop(self, crop, frame_idx):
+        """把姿态 crop 子图落盘保存（调试用，仅 SAVE_POSE_CROP 开启时调用）。
+
+        保存的图 = 实际喂给姿态模型的 ROI（从 preview 1280x720 抠出），
+        可用于复现并排查「姿态关键点丢失」的根因。落盘失败不中断主流程。
+        """
+        save_dir = Config.POSE_CROP_DIR
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            path = os.path.join(save_dir, f"pose_{frame_idx:06d}.jpg")
+            cv2.imwrite(path, crop)
+        except Exception as e:
+            logger.warning("姿态子图保存失败（%s: %s）", type(e).__name__, e)
+
+    @staticmethod
+    def _draw_kpts_on_crop(crop, kpts):
+        """在 crop 副本上叠加骨架连线 + 关键点（kpts 为裁剪图坐标系，无需反算）。"""
+        drawn = crop.copy()
+        for p1_idx, p2_idx in SKELETON_CONNECTIONS:
+            pt1, pt2 = kpts[p1_idx], kpts[p2_idx]
+            if pt1[0] > 0 and pt2[0] > 0:
+                cv2.line(drawn, (int(pt1[0]), int(pt1[1])),
+                         (int(pt2[0]), int(pt2[1])), (0, 255, 0), 2)
+        for i, pt in enumerate(kpts):
+            if pt[0] > 0:
+                cv2.circle(drawn, (int(pt[0]), int(pt[1])), 3, (0, 0, 255), -1)
+        return drawn
+
+    def _save_pose_crop_skel(self, crop, kpts, frame_idx):
+        """把带骨架的姿态 crop 子图落盘保存（调试用，仅 SAVE_POSE_CROP_SKEL 开启时调用）。
+
+        骨架基于 detect_crop 返回的关键点（裁剪图坐标系）直接叠加在 crop 上，
+        用于人工核对「关键点是否贴合人体、是否因扩边/crop 偏移产生错位」。
+        """
+        save_dir = Config.POSE_CROP_DIR
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+            drawn = self._draw_kpts_on_crop(crop, kpts)
+            path = os.path.join(save_dir, f"pose_{frame_idx:06d}_skel.jpg")
+            cv2.imwrite(path, drawn)
+        except Exception as e:
+            logger.warning("带骨架子图保存失败（%s: %s）", type(e).__name__, e)
+
     @staticmethod
     def _split_and_height(frame_metrics):
         """根据 frame_metrics 计算分界帧、seq1/seq2 与相对出手高度。
@@ -754,10 +1030,12 @@ class VideoAnalyzer:
         seq1, seq2 = [], []
         for m in frame_metrics:
             if m['angles'] is not None:
+                # 角度缺失为 None（关键点不可见）时按伸直 180 填充，避免 None 污染 DTW 序列
+                ang = [v if v is not None else 180.0 for v in m['angles']]
                 if m['idx'] <= idx_squat:
-                    seq1.append(m['angles'])
+                    seq1.append(ang)
                 else:
-                    seq2.append(m['angles'])
+                    seq2.append(ang)
 
         if not seq1:
             seq1 = [[180.0, 180.0, 180.0, 180.0], [180.0, 180.0, 180.0, 180.0]]
@@ -813,10 +1091,13 @@ class VideoAnalyzer:
 
         if data['angles'] is not None and len(data['angles']) == 4:
             shoulder, elbow, hip, knee = data['angles']
+            # 角度缺失为 None（关键点不可见）时显示为 '-'，避免 format None 抛异常
+            def _deg(v):
+                return f"{v:.1f}" if v is not None else "-"
             texts = [
                 f"Phase: {phase_label}",
-                f"Side: {data.get('side_str', 'Unknown')}", f"Shoulder: {shoulder:.1f}",
-                f"Elbow: {elbow:.1f}", f"Hip: {hip:.1f}", f"Knee: {knee:.1f}"
+                f"Side: {data.get('side_str', 'Unknown')}", f"Shoulder: {_deg(shoulder)}",
+                f"Elbow: {_deg(elbow)}", f"Hip: {_deg(hip)}", f"Knee: {_deg(knee)}"
             ]
             for i, txt in enumerate(texts):
                 cv2.putText(frame, txt, (20, 40 + i * 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
@@ -937,6 +1218,8 @@ class VideoAnalyzer:
             seq1 / seq2 / rel_height / frame_metrics / clip1_path / clip2_path
         """
         # 优先 MPP 硬解 H265（跳过软转码）；MPP 失败/未切出投篮则回退软转码+cv2
+        # 重置离线跟踪器（切换视频必须重置，避免残留锁定框污染新视频主球员）
+        self._tracker_off.reset()
         codec = self._probe_video_codec(video_path)
         if codec in ("hevc", "h265") and USE_MPP_DECODE:
             try:
@@ -966,7 +1249,7 @@ class VideoAnalyzer:
         # 关键点环形缓存 + 状态机：持续滚动，检测到一次投篮就切一段。
         # 环形缓存 deque(maxlen) 有界，天然防内存耗尽；本地文件顺序读取不产生帧堆积。
         # 实时 RTSP 流的丢帧策略沿用 _iter_rtsp_frames 的「只保留最新帧」模式。
-        segmenter = ShotSegmenter()
+        segmenter = ShotFSM()
         shots = []
         frame_idx = 0
 
@@ -980,7 +1263,7 @@ class VideoAnalyzer:
                 continue
 
             fd = self._extract_frame_metrics(frame, frame_idx, ts=frame_idx / fps)
-            seg = segmenter.feed(fd)
+            seg = segmenter.feed(fd).get('shot_event')
             if seg is not None:
                 # 过滤过短误检段（如出手前后仅 2 帧的假投篮）
                 if len(seg['frame_metrics']) < Config.MIN_SHOT_FRAMES:

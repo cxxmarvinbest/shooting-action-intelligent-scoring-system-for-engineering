@@ -1,0 +1,52 @@
+--ab_compare.py   
+对比暴力拉伸640×640和等比拉伸到640×360+补边 | python test/ab_compare.py
+
+--ab_cpp_engine.py
+对比cpp和lite/numpy引擎的检测 | python test/ab_cpp_engine.py --mode cpp/lite --frames 60/full
+
+--check_rknn_model.py 
+测试rknn模型 | python3 test/check_rknn_model.py [模型路径]
+
+--convert.py               
+onnx转换为rknn
+
+--detect_video.py
+单独检测篮球
+ 
+--test_inference_speed.py
+测量「目标检测 + 姿态估计」单帧总耗时（含预处理），同时跑投篮动作切分状态机
+输入：
+python test/test_inference_speed.py <视频路径> [--stride 2] [--timeout 100] [--frames 200]
+输出：
+  1. 总共检测到多少次投篮动作；
+  2. 每次投篮的开始/结束时间（视频内相对「标准时间」 T+mm:ss.xxx）与用时；
+  3. 单帧平均/最小/最大/中位耗时与平均 FPS，判断是否满足实时要求（< 60ms/帧）。
+   
+--test_pose_kpts_debug.py
+诊断pose模型能检出姿态 | python3 test/test_pose_kpts_debug.py test.jpg [--model weights/yolov8n-pose.rknn]
+
+--test_pose_model.py
+单独对一张图片测试姿态估计模型
+python3 test/test_pose_model.py <图片路径> [--model weights/yolov8n-pose.rknn] [--out 结果图] --crop x1,y1,x2,y2 --conf 0.1 --kpt 0.3
+
+--test_realtime_norm.py
+测试RGA两路输出 | python test/test_realtime_norm.py
+
+--test_single_target_tracker.py
+测试单一目标检测
+
+--test_speed_det_pose.py
+单帧[检测+姿态]耗时 | python test/test_speed_det_pose.py [循环次数，默认 100]
+
+--test_t_2.5_antiflicker.py
+测试Anti-flicker轻量单目标跟踪层
+python test/test_t2_5_antiflicker.py --video test/test_videos/left_rtsp.mp4 --frames 50/full
+
+--test_t2_5_regression.py
+T2-5端到端回归
+
+--verify_crop_margin.py
+测试有没有加margin
+
+--visualize_det.py
+抽帧画框可视化，用于对比cpp和lite/numpy引擎的检测
