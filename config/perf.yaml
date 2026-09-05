@@ -1,0 +1,19 @@
+# perf.yaml —— N2 实时全链路性能测速埋点
+# ------------------------------------------------------------------
+# 埋点统计「单帧各阶段耗时(ms) + 模块平均 fps」，每 N 帧周期打印一次。
+# 总开关关闭时走空埋点器（每帧仅几次空函数调用，≈0 开销，不影响性能）；
+# 也可直接注释掉业务代码中的 pf.begin_frame / pf.mark / pf.zone_* / pf.end_frame 行。
+
+# 实时 RTSP 推理链路埋点总开关（生产默认 false；压测/排障时置 true）
+# 也可用环境变量 LQ_PERF=1 临时开启，无需改文件。
+PERF_ENABLED: false
+
+# 离线视频分析链路是否复用同一套埋点（默认 false；离线测速时置 true）
+# 也可用环境变量 LQ_PERF_OFFLINE=1 开启。
+PERF_OFFLINE_ENABLED: false
+
+# 每处理多少帧打印一次统计（max/min/avg ms + fps）
+PERF_REPORT_EVERY: 100
+
+# 滑动统计窗口（帧）：统计最近 N 帧，deque 有界，不无限增长
+PERF_WINDOW: 100

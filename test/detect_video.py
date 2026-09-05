@@ -124,8 +124,13 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     orig_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     orig_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(OUT_VIDEO, fourcc, fps, (orig_w, orig_h))
+    # N5 改造：改用 FFmpegWriter（subprocess 调 ffmpeg + libx264）
+    from config import Config
+    from common.ffmpeg_writer import FFmpegWriter
+    codec = getattr(Config, 'FFMPEG_CODEC', 'libx264')
+    bitrate = getattr(Config, 'FFMPEG_BITRATE', '600k')
+    out = FFmpegWriter(OUT_VIDEO, orig_w, orig_h, fps,
+                       codec=codec, bitrate=bitrate)
 
     frame_id = 0
     while True:

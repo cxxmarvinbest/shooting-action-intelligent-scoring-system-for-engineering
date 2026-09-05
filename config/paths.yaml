@@ -1,7 +1,14 @@
 # paths.yaml —— 路径配置（相对 PROJECT_ROOT，loader 自动 join 为绝对路径）
+#
+# N1 重构：实时链路（inference_manage / recording_manage / http_manage）的
+# 视频 + 帧图 + data.json 统一改走 SAVE_DATA_ROOT；OUTPUT_DIR 仅作为
+# offline_video_scoring.py（开发期离线测试工具）的回退输出目录，标记为
+# legacy 不再被实时链路使用。
+
 WEIGHTS_DIR: "weights"                                  # 模型权重目录
 STANDARD_VIDEO_DIR: "data/standard"                     # 标准视频库（shot_*.mp4）
-OUTPUT_DIR: "data/output"                               # 评分结果输出目录
+SAVE_DATA_ROOT: "save_data"                             # N1 新根目录（实时链路）
+# offline_video_scoring.py 兼容字段（N1 范围外，仅供离线测试工具使用）
+OUTPUT_DIR: "save_data/legacy_output"
 STANDARD_CACHE_PATH: "data/cache/standard_lib.npz"      # 标准库特征缓存
 LOG_DIR: "logs"                                         # 运行日志目录
-RECORD_DIR: "data/output/videos"                        # 实时录制视频目录

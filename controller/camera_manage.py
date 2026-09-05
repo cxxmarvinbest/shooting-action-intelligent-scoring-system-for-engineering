@@ -68,6 +68,9 @@ class CameraManage(ThreadBase):
         self.last_error = ""           # 最近一次拉流错误（空=无）
         self._fps_window = deque(maxlen=30)  # 最近帧的时间戳窗口，用于统计解码帧率
 
+        # ── 最近一次 AI 推理指标（供 RecordingManage 渲染 ai 视频使用）──
+        self._latest_ai_metrics = None
+
     # ------------------------------------------------------------------
     # 拉流线程（ThreadBase._run）
     # ------------------------------------------------------------------
@@ -181,7 +184,8 @@ class CameraManage(ThreadBase):
         with self.lock:
             if self.state != "closed":
                 return False, "camera already open"
-            os.makedirs(self.recording.record_dir, exist_ok=True)
+            # 会话目录由 /start 才注入；打开摄像头（仅预览）阶段 session_dir 可能尚未建立，
+            # 因此此处不再 makedirs(record_dir)（旧逻辑会在启动时多建会话目录）。
             # 打开前显式清空残留（防止上次会话未消费完的帧堆积）
             self._latest_frame = None
             self._latest_scale = None
@@ -190,6 +194,7 @@ class CameraManage(ThreadBase):
             self.latest_idx = 0
             self.last_error = ""
             self.decode_mode = "none"
+            self._latest_ai_metrics = None
             # 限时等待上一次会话的拉流线程退出（释放 MPP 解码队列），避免阻塞卡死；
             # 旧线程通常数秒内退出，超时则后台继续退出，不阻塞本次打开。
             self.start(join_timeout=OPEN_JOIN_TIMEOUT_SEC)
@@ -212,6 +217,7 @@ class CameraManage(ThreadBase):
             self._recent_frames.clear()
             self._fps_window.clear()
             self.decode_mode = "none"
+            self._latest_ai_metrics = None
         return True, "closed"
 
     def set_state(self, state):
@@ -240,6 +246,21 @@ class CameraManage(ThreadBase):
         """
         with self.lock:
             return self._latest_frame, self._latest_scale, self.latest_idx
+
+    def latest_ai_metrics(self):
+        """返回最近一次推理产出的 AI 指标（player_box / kpts / angles / ball_boxes）。
+
+        供 RecordingManage 的 ai 写帧线程渲染「带骨架的同步 ai 视频」使用。
+        metrics 由 InferenceManage 在每次 _extract_frame_metrics_norm 之后更新；
+        若推理未启动 / 尚未产出，方法返回 None。
+        """
+        with self.lock:
+            return self._latest_ai_metrics
+
+    def set_ai_metrics(self, metrics):
+        """由 InferenceManage 在每帧推理后回写最新 metrics（原子赋值）。"""
+        with self.lock:
+            self._latest_ai_metrics = metrics
 
     def recent_frames(self, n=1):
         """返回最近 n 帧（按时间升序）；n<=0 返回空列表。"""

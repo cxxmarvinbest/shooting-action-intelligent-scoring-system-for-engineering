@@ -1,0 +1,27 @@
+# det.yaml —— 目标检测（两类别：0=player，1=basketball）推理阈值 + 后处理过滤
+# ============================================================
+# 作用域：把检测模型原始输出过滤为「干净的检测框」（单帧、模型输出级）。
+# 边界：投篮业务动作阈值在 fsm.yaml，禁止混入本文件。
+
+# 检测推理阈值（作用于 obj×cls 后的置信度）
+DET_CONF_THRES: 0.10        # 球员（player）置信度阈值
+DET_BALL_CONF_THRES: 0.05   # 篮球置信度阈值（篮球是小目标，用更低阈值，避免漏检）
+DET_NMS_THRES: 0.45         # NMS IoU 阈值
+DET_PLAYER_CLS_ID: 0        # player 在检测模型中的类别 id
+DET_BALL_CLS_ID: 1          # basketball 在检测模型中的类别 id
+
+# 检测模型固定输入尺寸（宽 x 高；best_int8.rknn 静态输入 640x640）
+# 仅 rknn_lite 引擎使用；cpp 引擎从模型文件自动读取尺寸，忽略此项
+DET_MODEL_W: 640
+DET_MODEL_H: 640
+
+# 篮球检测后处理过滤（自 inference.yaml 迁入，属检测域几何过滤）
+BALL_MAX_ASPECT: 2.0        # 篮球框最大长宽比（float，环境变量覆盖时按 float 解析）
+BALL_MAX_W_RATIO: 0.4       # 篮球框最大宽度（相对画面宽度）
+
+# ── Anti-flicker 单目标跟踪层（时序稳定主球员框，抑制身份跳变/单帧误检/单帧漏检）──
+ANTI_FLICKER_ENABLE: true     # 总开关（A/B 对比时临时置 false 回退纯面积选择）
+TRACKER_IOU_THRESH: 0.3       # 命中判定 IoU 阈值（候选框 vs 锁定框）
+TRACKER_HANGOVER: 3           # 连续漏检兜底帧数（超过则丢弃重置）
+TRACKER_CONFIRM: 1            # tentative 需连续命中帧数（1=首帧+下一帧续上即锁定）
+TRACKER_EMA_ALPHA: 0.5        # 框中心/宽高 EMA 平滑系数（越大越跟手）

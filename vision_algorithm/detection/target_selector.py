@@ -17,12 +17,12 @@ class TargetSelector:
     """球员/篮球目标筛选器（无状态，可复用）"""
 
     @staticmethod
-    def select_main_player_box(dets, player_cls_id=0):
+    def select_main_player_box(dets, player_cls_id):
         """
         从检测结果中选出面积最大的 player 框（cls == player_cls_id）。
 
         参数：dets —— RKNNDetModel 检测结果列表（坐标为检测画布/工作帧坐标系均可）
-              player_cls_id —— player 的类别 id（默认 0）
+              player_cls_id —— player 的类别 id（由调用方从 Config.DET_PLAYER_CLS_ID 显式传入）
         返回：player 框 (x1,y1,x2,y2)；无目标时返回 None
         """
         candidates = [d for d in dets if d['cls'] == player_cls_id]

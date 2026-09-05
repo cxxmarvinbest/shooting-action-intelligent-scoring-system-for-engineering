@@ -28,9 +28,8 @@ class RKNNDetModel(_RKNNBase):
     detect(frame) 返回 frame 原始坐标系；detect_on_canvas 返回 640x640 画布坐标系。
     """
 
-    def __init__(self, rknn_path, conf_thres=0.45, nms_thres=0.45,
-                 ball_conf_thres=0.30, model_w=640, model_h=640,
-                 core_mask=None):
+    def __init__(self, rknn_path, *, conf_thres, nms_thres, ball_conf_thres,
+                 model_w, model_h, core_mask=None):
         super().__init__(rknn_path, model_w=model_w, model_h=model_h,
                          core_mask=core_mask)
         self.conf_thres = conf_thres

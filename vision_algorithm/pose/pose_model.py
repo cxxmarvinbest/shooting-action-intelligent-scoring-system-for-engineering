@@ -30,9 +30,8 @@ class RKNNPoseModel(_RKNNBase):
 
     NUM_KPTS = 17
 
-    def __init__(self, rknn_path, conf_thres=0.3, nms_thres=0.45,
-                 kpt_conf_thres=0.5, model_w=320, model_h=320,
-                 core_mask=None):
+    def __init__(self, rknn_path, *, conf_thres, nms_thres, kpt_conf_thres,
+                 model_w, model_h, core_mask=None):
         super().__init__(rknn_path, model_w=model_w, model_h=model_h,
                          core_mask=core_mask)
         self.conf_thres = conf_thres

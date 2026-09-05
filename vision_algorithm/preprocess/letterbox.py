@@ -103,8 +103,13 @@ def convert_video(src_path, dst_path, target_w=Config.TARGET_W,
     if not cap.isOpened():
         return None
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(dst_path, fourcc, fps, (target_w, target_h))
+    # N5 改造：改用 FFmpegWriter（subprocess 调 ffmpeg + libx264）
+    from config import Config
+    from common.ffmpeg_writer import FFmpegWriter
+    codec = getattr(Config, 'FFMPEG_CODEC', 'libx264')
+    bitrate = getattr(Config, 'FFMPEG_BITRATE', '600k')
+    out = FFmpegWriter(dst_path, target_w, target_h, fps,
+                       codec=codec, bitrate=bitrate)
 
     pre = LetterboxPreprocessor(target_w, target_h, crop_x_offset)
     while True:

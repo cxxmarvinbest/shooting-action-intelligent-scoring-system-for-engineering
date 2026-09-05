@@ -17,6 +17,7 @@ PREVIEW_HEIGHT: 720
 SAVE_POSE_CROP: false
 # 带骨架版姿态子图（叠加关键点/骨架连线），独立开关，便于与纯图对比
 SAVE_POSE_CROP_SKEL: false
-POSE_CROP_DIR: "data/output/pose_crop"
+# N1 重构：调试 crop 目录迁到 save_data/pose_crop，与正常产物同根便于管理
+POSE_CROP_DIR: "save_data/pose_crop"
 # 是否在本地终端弹窗预览实时画面（工位测试用；RK3588 无 GUI 环境代码会自动关闭不报错）
 SHOW_PREVIEW: true

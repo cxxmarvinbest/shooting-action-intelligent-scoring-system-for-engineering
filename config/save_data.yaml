@@ -1,0 +1,26 @@
+# save_data.yaml —— save_data 落盘参数（N1 存储目录完整重构）
+#
+# 集中管理「投篮逐帧图 / data.json / 异步写盘 / 视频分片」相关参数，
+# 与 common/save_data_layout.py 配套使用。
+
+# ── 投篮逐帧图：player 框外扩 margin（像素），用于裁剪 src/ai 帧图 ──
+# 裁剪范围 = [player_box.x1 - margin, y1 - margin, x2 + margin, y2 + margin]，
+# 再 clip 到原图边界。
+SHOT_CROP_MARGIN: 40
+
+# ── 投篮逐帧图：JPEG 编码质量（0~100，越高质量越好/体积越大）──
+SHOT_JPEG_QUALITY: 90
+
+# ── data.json 是否写入「每帧 17 点关键点 list_pose」 ──
+# true: 写全量关键点（数据完备，便于复现调试，单投约 40~60 帧 × 17 点 ≈ 1KB）
+# false: 仅写时间/帧号/分数，文件最小（生产环境推荐）
+SHOT_JSON_INCLUDE_POSE: true
+
+# ── 异步写盘队列上限（背压阈值，满则丢最旧任务）──
+SAVE_DATA_QUEUE_SIZE: 256
+
+# ── 写盘线程退出超时（秒）：会话结束时排空队列的最大等待时间 ──
+SAVE_DATA_CLOSE_TIMEOUT: 5.0
+
+# ── 投篮子目录编号宽度（位）：001/002 形式，必须与 layout.SHOT_IDX_WIDTH 一致 ──
+SHOT_IDX_WIDTH: 3

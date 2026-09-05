@@ -15,9 +15,12 @@
 """
 
 import json
+import logging
 import os
 
 import yaml
+
+logger = logging.getLogger("basketball_scoring")
 
 # config/ 目录与项目根目录
 CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,11 +30,38 @@ PROJECT_ROOT = os.path.dirname(CONFIG_DIR)
 ENV_OVERRIDES = {
     "DET_RKNN_PATH": "LQ_DET_RKNN",
     "POSE_RKNN_PATH": "LQ_POSE_RKNN",
+    # ── 姿态推理（pose.yaml）──
+    "POSE_CONF_THRES": "LQ_POSE_CONF_THRES",
     "POSE_KPT_CONF_THRES": "LQ_POSE_KPT_CONF_THRES",
+    "POSE_NMS_THRES": "LQ_POSE_NMS_THRES",
+    "POSE_CROP_MARGIN": "LQ_POSE_CROP_MARGIN",
+    "POSE_MODEL_W": "LQ_POSE_MODEL_W",
+    "POSE_MODEL_H": "LQ_POSE_MODEL_H",
+    # ── 检测推理（det.yaml）──
+    "DET_CONF_THRES": "LQ_DET_CONF_THRES",
+    "DET_BALL_CONF_THRES": "LQ_DET_BALL_CONF_THRES",
+    "DET_NMS_THRES": "LQ_DET_NMS_THRES",
+    "DET_PLAYER_CLS_ID": "LQ_DET_PLAYER_CLS_ID",
+    "DET_BALL_CLS_ID": "LQ_DET_BALL_CLS_ID",
+    "DET_MODEL_W": "LQ_DET_MODEL_W",
+    "DET_MODEL_H": "LQ_DET_MODEL_H",
+    # ── 篮球后处理过滤（det.yaml，自 inference.yaml 迁入）──
+    "BALL_MAX_ASPECT": "LQ_BALL_MAX_ASPECT",
+    "BALL_MAX_W_RATIO": "LQ_BALL_MAX_W_RATIO",
     "NPU_CORE_MASK": "LQ_NPU_CORE_MASK",
     "STANDARD_VIDEO_DIR": "LQ_STD_DIR",
     "OUTPUT_DIR": "LQ_OUT_DIR",
     "STANDARD_CACHE_PATH": "LQ_STANDARD_CACHE",
+    # ── 存储目录重构 ──
+    "SAVE_DATA_ROOT": "LQ_SAVE_DATA_ROOT",
+    "SHOT_CROP_MARGIN": "LQ_SHOT_CROP_MARGIN",
+    "SHOT_JPEG_QUALITY": "LQ_SHOT_JPEG_QUALITY",
+    "SHOT_JSON_INCLUDE_POSE": "LQ_SHOT_JSON_INCLUDE_POSE",
+    "SAVE_DATA_QUEUE_SIZE": "LQ_SAVE_DATA_QUEUE_SIZE",
+    "SAVE_DATA_CLOSE_TIMEOUT": "LQ_SAVE_DATA_CLOSE_TIMEOUT",
+    "RECORD_RAW_CLIP": "LQ_RECORD_RAW_CLIP",
+    "RECORD_AI_CLIP": "LQ_RECORD_AI_CLIP",
+    "RECORD_AI_JPEG_QUALITY": "LQ_RECORD_AI_JPEG_QUALITY",
     "CROP_X_OFFSET": "LQ_CROP_X_OFFSET",
     "FRAME_STRIDE": "LQ_FRAME_STRIDE",
     "RING_PRECACHE_FRAMES": "LQ_RING_PRECACHE",
@@ -51,6 +81,18 @@ ENV_OVERRIDES = {
     "SHOW_PREVIEW": "LQ_SHOW_PREVIEW",
     "REALTIME_STATUS_INTERVAL": "LQ_RT_STATUS_INTERVAL",
     "RECORD_ROTATE_SEC": "LQ_RECORD_ROTATE",
+    # ── 性能测速埋点（perf.yaml）──
+    "PERF_ENABLED": "LQ_PERF",
+    "PERF_OFFLINE_ENABLED": "LQ_PERF_OFFLINE",
+    "PERF_REPORT_EVERY": "LQ_PERF_REPORT_EVERY",
+    "PERF_WINDOW": "LQ_PERF_WINDOW",
+    # ── 关键点局部补偿（compensate.yaml）──
+    "COMPENSATE_ENABLED": "LQ_COMPENSATE",
+    "COMPENSATE_DIST_THRESHOLD": "LQ_COMPENSATE_DIST",
+    "COMPENSATE_JUMP_THRESHOLD": "LQ_COMPENSATE_JUMP",
+    "COMPENSATE_CONF_LOW": "LQ_COMPENSATE_CONF_LOW",
+    "COMPENSATE_CONF_HIGH": "LQ_COMPENSATE_CONF_HIGH",
+    "COMPENSATE_LOG_DETAIL": "LQ_COMPENSATE_LOG",
 }
 
 # 需要 join PROJECT_ROOT 的相对路径字段
@@ -58,7 +100,7 @@ PATH_KEYS = {
     "WEIGHTS_DIR", "LOG_DIR", "RECORD_DIR",
     "DET_RKNN_PATH", "POSE_RKNN_PATH",
     "STANDARD_VIDEO_DIR", "OUTPUT_DIR", "STANDARD_CACHE_PATH",
-    "POSE_CROP_DIR",
+    "POSE_CROP_DIR", "SAVE_DATA_ROOT",
 }
 
 
@@ -78,6 +120,7 @@ def _coerce(value, reference):
 def _load_all():
     """加载 config/*.yaml 并合并为扁平 dict。"""
     cfg = {}
+    key_sources = {}  # key -> 首次定义该 key 的文件名（用于重复检测）
     for fname in sorted(os.listdir(CONFIG_DIR)):
         if not fname.endswith(".yaml") and not fname.endswith(".yml"):
             continue
@@ -86,12 +129,25 @@ def _load_all():
             data = yaml.safe_load(f) or {}
         if not isinstance(data, dict):
             continue
+        for key in data:
+            if key in cfg:
+                # 顶层 key 跨文件重复是配置错误（loader 按文件名排序静默覆盖，
+                # 会掩盖「迁移/重构后忘删旧 key」的坑），这里显式报错阻断启动。
+                raise RuntimeError(
+                    f"配置重复键 {key}：已在 {key_sources[key]} 定义，"
+                    f"又被 {fname} 重复定义。请删除其一，避免静默覆盖。")
+            key_sources[key] = fname
         cfg.update(data)
 
     # 环境变量覆盖 + 按默认值类型转换
     for key, env_name in ENV_OVERRIDES.items():
         env_val = os.environ.get(env_name)
-        if key in cfg and env_val not in (None, ""):
+        if env_val not in (None, ""):
+            if key not in cfg:
+                logger.warning(
+                    "环境变量 %s=%s 已设置，但配置中不存在对应键 %s，忽略（可能拼写错误或已改名）",
+                    env_name, env_val, key)
+                continue
             cfg[key] = _coerce(env_val, cfg[key])
 
     # 相对路径字段 join PROJECT_ROOT（已是绝对路径则原样保留）

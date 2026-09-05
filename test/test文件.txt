@@ -1,52 +1,61 @@
---ab_compare.py   
-对比暴力拉伸640×640和等比拉伸到640×360+补边 | python test/ab_compare.py
+# test/ 目录结构说明
+# 归类标准：speed=耗时"能不能实时"；regression=改动前后 A/B 回归；debug=单点排查；unit=零 RKNN 单元测试；tools=工具
 
---ab_cpp_engine.py
-对比cpp和lite/numpy引擎的检测 | python test/ab_cpp_engine.py --mode cpp/lite --frames 60/full
-
---check_rknn_model.py 
-测试rknn模型 | python3 test/check_rknn_model.py [模型路径]
-
---convert.py               
-onnx转换为rknn
-
---detect_video.py
-单独检测篮球
- 
+【speed/ 性能耗时】
 --test_inference_speed.py
-测量「目标检测 + 姿态估计」单帧总耗时（含预处理），同时跑投篮动作切分状态机
-输入：
-python test/test_inference_speed.py <视频路径> [--stride 2] [--timeout 100] [--frames 200]
-输出：
-  1. 总共检测到多少次投篮动作；
-  2. 每次投篮的开始/结束时间（视频内相对「标准时间」 T+mm:ss.xxx）与用时；
-  3. 单帧平均/最小/最大/中位耗时与平均 FPS，判断是否满足实时要求（< 60ms/帧）。
-   
---test_pose_kpts_debug.py
-诊断pose模型能检出姿态 | python3 test/test_pose_kpts_debug.py test.jpg [--model weights/yolov8n-pose.rknn]
-
---test_pose_model.py
-单独对一张图片测试姿态估计模型
-python3 test/test_pose_model.py <图片路径> [--model weights/yolov8n-pose.rknn] [--out 结果图] --crop x1,y1,x2,y2 --conf 0.1 --kpt 0.3
-
---test_realtime_norm.py
-测试RGA两路输出 | python test/test_realtime_norm.py
-
---test_single_target_tracker.py
-测试单一目标检测
-
+  整条流水线（检测+姿态）单帧耗时 + 投篮切分 + FPS
+  python test/speed/test_inference_speed.py <视频路径> [--stride 2] [--timeout 100] [--frames 200]
 --test_speed_det_pose.py
-单帧[检测+姿态]耗时 | python test/test_speed_det_pose.py [循环次数，默认 100]
+  单帧「检测+姿态」分阶段耗时
+  python test/speed/test_speed_det_pose.py [循环次数，默认 100]
 
---test_t_2.5_antiflicker.py
-测试Anti-flicker轻量单目标跟踪层
-python test/test_t2_5_antiflicker.py --video test/test_videos/left_rtsp.mp4 --frames 50/full
-
+【regression/ A/B 对比 + 端到端回归】
+--ab_compare.py
+  预处理方案 A（暴力拉伸）/B（等比+补边）/L（letterbox）精度耗时对比
+  python test/regression/ab_compare.py
+--ab_cpp_engine.py
+  cpp 引擎 vs rknn_lite 引擎检测 A/B 对比
+  python test/regression/ab_cpp_engine.py --mode cpp/lite --frames 60
+--test_t2_5_antiflicker.py
+  T2 Anti-flicker 跟踪层 ON/OFF A/B 回归
+  python test/regression/test_t2_5_antiflicker.py --video test/test_videos/left_rtsp.mp4 --frames 50
 --test_t2_5_regression.py
-T2-5端到端回归
-
+  T2-5 margin 端到端回归
+  python test/regression/test_t2_5_regression.py --video test/test_videos/left_rtsp.mp4 --frames 50
 --verify_crop_margin.py
-测试有没有加margin
-
+  margin 扩边副作用验证（关键点精度损失量化）
+  python test/regression/verify_crop_margin.py --frames 50 --margins 0,10,20,30
+--test_realtime_norm.py
+  实时 RGA 坐标链离线验证
+  python test/regression/test_realtime_norm.py
 --visualize_det.py
-抽帧画框可视化，用于对比cpp和lite/numpy引擎的检测
+  cpp vs lite 检测框抽帧可视化对比
+  python test/regression/visualize_det.py --frames 130,180,250
+
+【debug/ 模型/姿态单点排查】
+--test_pose_model.py
+  单图姿态估计测试（骨架/关键点可视化）
+  python3 test/debug/test_pose_model.py <图片路径> [--model ...] [--out ...] --crop x1,y1,x2,y2 --conf 0.1 --kpt 0.3
+--test_pose_kpts_debug.py
+  姿态关键点全 0 根因诊断
+  python3 test/debug/test_pose_kpts_debug.py test.jpg [--model weights/yolov8n-pose.rknn]
+--check_rknn_model.py
+  查看 RKNN 模型输入/输出参数
+  python3 test/debug/check_rknn_model.py [模型路径]
+
+【unit/ 纯 Python 单元测试】
+--test_single_target_tracker.py
+  SingleTargetTracker 单元测试（零 RKNN 依赖，Windows 本地可跑）
+  python test/unit/test_single_target_tracker.py
+
+【tools/ 工具】
+--convert.py
+  ONNX→RKNN 模型转换
+--open_rtsp_test.py
+  RTSP GStreamer 拉流测试
+
+【根目录遗留脚本（未归类，保留）】
+--detect_video.py
+  老版独立检测（rknn.api 写死配置，与当前 vision_algorithm 架构无关）
+--yolov8.py
+  rknn_model_zoo 老脚本（废弃）

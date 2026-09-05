@@ -264,7 +264,7 @@ def _json_default(o):
     raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
 
-def _write_outputs(rows, shots, fsm_cfg, video_path, fps, stride, out_dir):
+def _write_outputs(rows, shots, fsm_cfg, video_path, fps, stride, out_dir, analyzer=None):
     """写 CSV（utf-8-sig，Excel 友好）与 JSON（含 meta + frames）。"""
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(video_path))[0]
@@ -286,6 +286,14 @@ def _write_outputs(rows, shots, fsm_cfg, video_path, fps, stride, out_dir):
             "frame_count": len(rows),
             "shots": [_shot_summary(s) for s in shots],
             "fsm_config": fsm_cfg,
+            "compensate": {
+                "enabled": getattr(analyzer, '_kpt_comp', None) is not None
+                             and getattr(getattr(analyzer, '_kpt_comp', None), 'enabled', False),
+                "dist_threshold": float(Config.get("COMPENSATE_DIST_THRESHOLD", 30.0)),
+                "jump_threshold": float(Config.get("COMPENSATE_JUMP_THRESHOLD", 80.0)),
+                "conf_low": float(Config.get("COMPENSATE_CONF_LOW", 0.3)),
+                "conf_high": float(Config.get("COMPENSATE_CONF_HIGH", 0.5)),
+            },
         },
         "frames": rows,
     }
@@ -295,13 +303,27 @@ def _write_outputs(rows, shots, fsm_cfg, video_path, fps, stride, out_dir):
     return csv_path, json_path
 
 
-def run_export(video_path, out_dir, stride=1, max_frames=0):
-    """主流程：加载模型 -> 逐帧提取特征 + FSM 判别 -> 写 CSV/JSON。"""
+def run_export(video_path, out_dir, stride=1, max_frames=0,
+                compensate=None):
+    """主流程：加载模型 -> 逐帧提取特征 + FSM 判别 -> 写 CSV/JSON。
+
+    参数：
+        compensate  —— 三值开关：True=强制开启 / False=强制关闭 / None=跟随 yaml 配置
+    """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"视频文件不存在: {video_path}")
 
+    # ── N3 补偿 CLI 覆盖（在模型加载前生效，影响 Config 全局状态）──
+    if compensate is True:
+        os.environ["LQ_COMPENSATE"] = "1"
+        logger.info("N3 补偿: CLI 强制开启（--compensate）")
+    elif compensate is False:
+        os.environ["LQ_COMPENSATE"] = "0"
+        logger.info("N3 补偿: CLI 强制关闭（--no-compensate）")
+    # compensate=None 时跟随 config/compensate.yaml，不做覆盖
+
     logger.info("=" * 60)
-    logger.info("特征导出开始（阶段 2 阈值修正前置）")
+    logger.info("特征导出开始（阶段 2 阈值修正前置 + N3 关键点补偿可选）")
     logger.info("视频: %s", video_path)
     logger.info("采样步长=%d, 最多处理=%d 帧(0=全部)", stride, max_frames)
 
@@ -354,7 +376,7 @@ def run_export(video_path, out_dir, stride=1, max_frames=0):
     analyzer.release_models()
 
     csv_path, json_path = _write_outputs(
-        rows, shots, fsm.cfg, video_path, fps, stride, out_dir)
+        rows, shots, fsm.cfg, video_path, fps, stride, out_dir, analyzer=analyzer)
 
     logger.info("=" * 60)
     logger.info("特征导出完成: 共 %d 帧", len(rows))
@@ -379,6 +401,10 @@ def main():
     parser.add_argument("--frames", type=int, default=0,
                         help="最多处理帧数（0=整段视频）")
     parser.add_argument("--log-dir", default=None, help="日志目录（默认 logs）")
+    parser.add_argument("--compensate", action="store_true", default=None,
+                        help="强制开启 N3 关键点局部补偿（覆盖 yaml 配置）")
+    parser.add_argument("--no-compensate", action="store_true", default=None,
+                        help="强制关闭 N3 关键点局部补偿（覆盖 yaml 配置）")
     args = parser.parse_args()
 
     log_dir = args.log_dir or os.path.join(PROJECT_ROOT, "logs")
@@ -389,7 +415,9 @@ def main():
                  else int(Config.FRAME_STRIDE))
 
     try:
-        run_export(args.video, out_dir, stride=stride, max_frames=args.frames)
+        run_export(args.video, out_dir, stride=stride, max_frames=args.frames,
+                   compensate=args.compensate if args.compensate is not None
+                   else (not args.no_compensate if args.no_compensate is not None else None))
         logger.info("=" * 60)
         logger.info("特征导出流程结束")
     except Exception:

@@ -18,6 +18,8 @@ HTTP 服务管理（controller/http_manage）
 import base64
 import json
 import logging
+import os
+import time
 
 import cv2
 import numpy as np
@@ -27,6 +29,7 @@ from config import Config
 from common.thread_base import ThreadBase
 from common.exceptions import (
     HttpApiError, BaseAlgoError, classify_exception)
+from common.save_data_layout import SaveDataLayout
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -39,7 +42,19 @@ class HttpManage(ThreadBase):
         self.std_lib_mgr = std_lib_mgr
         self.camera = camera
         self.inference = inference
+        # N1：save_data 路径布局（用于 /start 时创建 session_dir）
+        self.layout = SaveDataLayout(root=Config.SAVE_DATA_ROOT)
+        # N1：当前会话目录（/start 创建，/stop 结束；同一时刻最多一个活跃会话）
+        self.session_dir = None
+        self.session_name = None
+        self.session_user_id = "0000"
+        self.session_start_ts = None
         self.app = Flask(__name__)
+        # N1：把 camera 引用注入 recording（ai 视频渲染拉 AI metrics 用）
+        try:
+            self.camera.recording.set_camera(self.camera)
+        except Exception:
+            pass
         self._register_routes()
         self._register_error_handlers()
 
@@ -80,6 +95,44 @@ class HttpManage(ThreadBase):
         return 500
 
     # ------------------------------------------------------------------
+    # 会话元数据（N1：user_id 随会话持久化到 save_data）
+    # ------------------------------------------------------------------
+    def _write_session_meta(self, end_ts=None):
+        """把当前会话的元数据（含 user_id）写入 session 目录下的 session_meta.json。
+
+        会话以 /start 为创建起点、/stop 为结束点；end_ts 为空时表示「进行中」，
+        /stop 时补上 end_time。写入失败仅打日志，不中断主流程。
+        """
+        if not self.session_dir:
+            return None
+        import datetime as _dt
+        meta = {
+            "session_name": self.session_name,
+            "user_id": self.session_user_id or "0000",
+            "start_time": _dt.datetime.fromtimestamp(
+                self.session_start_ts).strftime("%Y-%m-%d %H:%M:%S")
+                if self.session_start_ts else None,
+            "start_epoch": self.session_start_ts,
+            "end_time": _dt.datetime.fromtimestamp(end_ts).strftime(
+                "%Y-%m-%d %H:%M:%S") if end_ts else None,
+            "end_epoch": end_ts,
+            "save_data_root": Config.SAVE_DATA_ROOT,
+            "session_dir": self.session_dir,
+            "videos_dir": os.path.join(self.session_dir, "videos"),
+            "images_dir": os.path.join(self.session_dir, "images"),
+        }
+        meta_path = os.path.join(self.session_dir, "session_meta.json")
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            logger.info("会话元数据已写入: %s", meta_path)
+            return meta_path
+        except Exception as e:
+            logger.error("会话元数据写入失败（%s: %s）: %s",
+                         type(e).__name__, e, meta_path)
+            return None
+
+    # ------------------------------------------------------------------
     # 路由注册
     # ------------------------------------------------------------------
     def _register_routes(self):
@@ -118,6 +171,11 @@ class HttpManage(ThreadBase):
                 # 先停推理线程，再关摄像头，避免在拉流线程退出前消费帧
                 self.inference.stop()
                 self.camera.recording.close()
+                # N1：兜底关闭异步写盘器
+                try:
+                    self.inference.close_shot_writer()
+                except Exception:
+                    pass
                 ok, msg = self.camera.close()
             except Exception as e:
                 raise HttpApiError("关闭摄像头失败", cause=e) from e
@@ -130,14 +188,29 @@ class HttpManage(ThreadBase):
                 raise HttpApiError("摄像头未就绪，请先 POST /open", errno=409)
             if self.camera.recording.is_recording:
                 raise HttpApiError("已在录像中", errno=409)
+            # 纯录像也需要一个会话目录承载 videos/ 输出（user_id 缺省 0000）
+            if not self.session_dir:
+                try:
+                    self.session_dir, self.session_name = self.layout.new_session_dir(
+                        user_id="0000")
+                    self.session_user_id = "0000"
+                    self.session_start_ts = time.time()
+                    self.camera.recording.set_session_dir(self.session_dir)
+                    self._write_session_meta()
+                except Exception as e:
+                    raise HttpApiError("创建录像会话目录失败", cause=e) from e
             try:
-                writer, path = self.camera.recording.open()
+                # open() 返回 4 元组 (raw_writer, raw_path, ai_writer, ai_path)
+                writer, path, ai_writer, ai_path = self.camera.recording.open()
             except Exception as e:
                 raise HttpApiError("打开录制器失败", cause=e) from e
             if writer is None:
                 raise HttpApiError("录制器打开失败（视频损坏或路径不可写）", errno=500)
             self.camera.set_state("recording")
-            return jsonify({"code": 0, "msg": path, "video_path": path})
+            return jsonify({
+                "code": 0, "msg": path, "video_path": path,
+                "ai_video_path": ai_path, "session_dir": self.session_dir,
+            })
 
         @app.route("/record/stop", methods=["POST"])
         def api_record_stop():
@@ -163,16 +236,52 @@ class HttpManage(ThreadBase):
                 raise HttpApiError("模型/标准库加载失败", cause=e) from e
             if self.camera.state not in ("opened", "paused", "stopped"):
                 raise HttpApiError("摄像头未就绪，请先 POST /open", errno=409)
-            # reset_session 会创建新 segmenter 并设 recognition_active=True，启用评分
-            self.inference.reset_session()
+            # N1：从请求 body 解析 user_id（可选，无则默认 0000）；
+            # 同时兼容表单/JSON 两种入参形态
+            user_id = None
             try:
-                writer, path = self.camera.recording.open()
+                if request.is_json:
+                    payload = request.get_json(silent=True) or {}
+                    user_id = payload.get("user_id")
+                if not user_id:
+                    user_id = request.form.get("user_id")
+            except Exception:
+                user_id = None
+            # N1：创建 save_data/{date}/{session} 目录，注入到 camera.recording 与 inference
+            try:
+                self.session_dir, session_name = self.layout.new_session_dir(
+                    user_id=user_id)
+                self.session_name = session_name
+                self.session_user_id = user_id or "0000"
+                self.session_start_ts = time.time()
+            except Exception as e:
+                raise HttpApiError("创建会话目录失败", cause=e) from e
+            try:
+                self.camera.recording.set_session_dir(self.session_dir)
+            except Exception as e:
+                raise HttpApiError("注入会话目录到录制器失败", cause=e) from e
+            # 先打开录制器：失败则整体中止，避免「识别已开但录像没开」的半残状态
+            # （此前顺序为 reset_session 先于 open，open 失败后识别仍在跑、/stop 会 409）
+            try:
+                writer, path, ai_writer, ai_path = self.camera.recording.open()
             except Exception as e:
                 raise HttpApiError("打开录制器失败", cause=e) from e
             if writer is None:
                 raise HttpApiError("录制器打开失败（视频损坏或路径不可写）", errno=500)
+            # 录像就绪后再启用识别（reset_session 建新 segmenter 并设 recognition_active=True）
+            self.inference.reset_session(session_dir=self.session_dir)
+            # 会话元数据（含 user_id）落盘，随 save_data 持久化
+            self._write_session_meta()
             self.camera.set_state("running")
-            return jsonify({"code": 0, "msg": path, "video_path": path})
+            return jsonify({
+                "code": 0,
+                "msg": path,
+                "video_path": path,
+                "ai_video_path": ai_path,
+                "session_dir": self.session_dir,
+                "session_name": session_name,
+                "user_id": user_id or "0000",
+            })
 
         @app.route("/pause", methods=["POST"])
         def api_pause():
@@ -186,11 +295,27 @@ class HttpManage(ThreadBase):
             if self.camera.state not in ("recording", "running", "paused"):
                 raise HttpApiError("当前未在录制/运动中", errno=409)
             path = self.camera.recording.path  # 先取路径，close 会清空 current_path
-            # 关闭识别（但保留推理线程继续做帧提取，Qt 端仍能继续预览）
+            # ── 会话结束点：/stop 必须触发完整保存逻辑，不能只靠定时周期 ──
+            # 1) 关闭识别（保留推理线程继续做帧提取，Qt 端仍能继续预览）
             self.inference.set_recognition_active(False)
-            self.camera.recording.close()
+            # 2) 强制落盘视频（release 写入 moov，未满 5 分钟也立即保存）
+            try:
+                self.camera.recording.close()
+            except Exception as e:
+                logger.error("停止运动时视频落盘失败（%s: %s）", type(e).__name__, e)
+            # 3) 排空投篮逐帧图 + data.json 异步写盘队列
+            try:
+                self.inference.close_shot_writer()
+            except Exception as e:
+                logger.error("停止运动时排空写盘队列失败（%s: %s）",
+                             type(e).__name__, e)
+            # 4) 会话元数据补记 end_time，标记会话结束
+            self._write_session_meta(end_ts=time.time())
             self.camera.set_state("stopped")
-            return jsonify({"code": 0, "msg": path, "video_path": path})
+            return jsonify({
+                "code": 0, "msg": path, "video_path": path,
+                "session_dir": self.session_dir,
+            })
 
         @app.route("/status", methods=["GET"])
         def api_status():
@@ -202,6 +327,12 @@ class HttpManage(ThreadBase):
                 "model_loaded": self.std_lib_mgr.analyzer is not None,
                 "recording_path": self.camera.recording.path,
                 "channel": self._channel_status(),
+                # N1：save_data 会话信息
+                "save_data": {
+                    "root": Config.SAVE_DATA_ROOT,
+                    "session_dir": self.session_dir,
+                    "shot_writer": self.inference.shot_writer.stats(),
+                },
             })
 
         @app.route("/frames", methods=["GET"])

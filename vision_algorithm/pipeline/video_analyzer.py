@@ -27,6 +27,9 @@ import numpy as np
 
 from config import Config
 from common.exceptions import VideoSplitError
+from common.ffmpeg_writer import FFmpegWriter
+from common.profiler import get_realtime_profiler, get_offline_profiler
+from common.keypoint_compensator import create_compensator_from_config
 from vision_algorithm.common.rknn_infer import letterbox_to_model
 from vision_algorithm.mpp.mpp_config import (
     USE_MPP_DECODE, MPP_DISPLAY_W, MPP_DISPLAY_H, MPP_QUEUE_SIZE,
@@ -80,6 +83,14 @@ class VideoAnalyzer:
         # 注意：属性不能与方法 _save_pose_crop_skel 同名（会遮蔽方法，报 bool not callable）
         self._save_pose_crop_skel_enabled = bool(Config.get("SAVE_POSE_CROP_SKEL", False))
         self._pose_crop_save_cnt = 0
+        # N2 性能埋点：实时 RTSP 链路单例（PERF_ENABLED=false 时为空埋点器，开销≈0）。
+        # 埋点均为独立单行（pf.begin_frame/mark/end_frame），可整体注释移除。
+        self._pf = get_realtime_profiler()
+        # N2 性能埋点：离线视频链路单例（PERF_OFFLINE_ENABLED=true 才启用，默认关闭）。
+        self._pf_offline = get_offline_profiler()
+        # N3 关键点局部补偿器（COMPENSATE_ENABLED=false 时为空补偿器，开销≈copy）。
+        # 补偿在 kpts 提取后、extract_pose_features 前执行；原始 kpts 不变，仅补偿副本送 FSM。
+        self._kpt_comp = create_compensator_from_config()
 
     def load_models(self):
         """加载 RKNN 检测模型（640x640）与姿态估计模型（320x320）。
@@ -87,6 +98,9 @@ class VideoAnalyzer:
         检测引擎由 DET_ENGINE 决定：
           - rknn_lite：Python numpy 后处理（默认，保守，已验证）
           - cpp      ：C++ 后处理（性能优，需 .so 已部署，A/B 验证后启用）
+
+        所有推理阈值均显式从 Config 读取（env 优先、yaml 兜底），构造函数不再提供
+        业务默认值，杜绝「yaml 配置存在但代码用写死默认值」。
         """
         core_mask = Config.get("NPU_CORE_MASK", 7)
         det_engine = str(Config.get("DET_ENGINE", "rknn_lite")).strip().lower()
@@ -95,6 +109,20 @@ class VideoAnalyzer:
         logger.info("加载姿态模型: %s", Config.POSE_RKNN_PATH)
         logger.info("NPU 核心调度模式: %s", core_mask)
 
+        # ── 显式收集推理参数（唯一事实来源 = Config）──
+        det_params = dict(
+            conf_thres=float(Config.get("DET_CONF_THRES")),
+            ball_conf_thres=float(Config.get("DET_BALL_CONF_THRES")),
+            nms_thres=float(Config.get("DET_NMS_THRES")),
+            model_w=int(Config.get("DET_MODEL_W")),
+            model_h=int(Config.get("DET_MODEL_H")))
+        pose_params = dict(
+            conf_thres=float(Config.get("POSE_CONF_THRES")),
+            kpt_conf_thres=float(Config.get("POSE_KPT_CONF_THRES")),
+            nms_thres=float(Config.get("POSE_NMS_THRES")),
+            model_w=int(Config.get("POSE_MODEL_W")),
+            model_h=int(Config.get("POSE_MODEL_H")))
+
         if det_engine == "cpp":
             logger.info("加载 C++ 检测模型: %s", Config.DET_RKNN_PATH)
             from vision_algorithm.detection.cpp_det_model import CppDetModel
@@ -102,21 +130,56 @@ class VideoAnalyzer:
         else:
             logger.info("加载检测模型(rknn_lite): %s", Config.DET_RKNN_PATH)
             self.det_model = RKNNDetModel(
-                Config.DET_RKNN_PATH,
-                conf_thres=Config.DET_CONF_THRES,
-                nms_thres=Config.DET_NMS_THRES,
-                ball_conf_thres=Config.get("DET_BALL_CONF_THRES", 0.30),
-                model_w=640, model_h=640,
-                core_mask=core_mask)
+                Config.DET_RKNN_PATH, core_mask=core_mask, **det_params)
 
         self.pose_model = RKNNPoseModel(
-            Config.POSE_RKNN_PATH,
-            conf_thres=Config.POSE_CONF_THRES,
-            nms_thres=Config.DET_NMS_THRES,
-            kpt_conf_thres=Config.get("POSE_KPT_CONF_THRES", 0.5),
-            model_w=Config.get("POSE_MODEL_W", 320),
-            model_h=Config.get("POSE_MODEL_H", 320),
-            core_mask=core_mask)
+            Config.POSE_RKNN_PATH, core_mask=core_mask, **pose_params)
+
+        self._log_effective_inference_params()
+
+    def _log_effective_inference_params(self):
+        """打印并校验「实际生效」的推理参数（以模型实例属性为准，而非 Config）。
+
+        目的：排查「yaml 配置存在、但代码用了函数签名写死默认值」的坑——
+        若实例属性与 Config 值不一致，说明有参数未正确透传，此处告警。
+        """
+
+        def _check(name, cfg_val, inst_val, tol=1e-6):
+            ok = inst_val is not None and abs(float(inst_val) - float(cfg_val)) <= tol
+            if not ok:
+                logger.error(
+                    "推理参数不一致: %s 配置值=%s 但实例生效值=%s（可能存在写死默认值未透传）",
+                    name, cfg_val, inst_val)
+            return ok
+
+        # 检测模型：cpp 引擎阈值在 C++ 内部硬编码，不受 yaml 控制，仅打印不校验
+        if isinstance(getattr(self, "det_model", None), RKNNDetModel):
+            det = self.det_model
+            logger.info(
+                "[生效参数] 检测(rknn_lite): conf=%.3f ball_conf=%.3f nms=%.3f model=%dx%d",
+                det.conf_thres, det.ball_conf_thres, det.nms_thres,
+                det.model_w, det.model_h)
+            _check("DET_CONF_THRES", Config.get("DET_CONF_THRES"), det.conf_thres)
+            _check("DET_BALL_CONF_THRES", Config.get("DET_BALL_CONF_THRES"), det.ball_conf_thres)
+            _check("DET_NMS_THRES", Config.get("DET_NMS_THRES"), det.nms_thres)
+        else:
+            logger.info(
+                "[生效参数] 检测(cpp): 阈值由 C++ 内部硬编码（BOX_THRESH=0.25, NMS=0.45），"
+                "不受 yaml 控制")
+
+        pose = self.pose_model
+        logger.info(
+            "[生效参数] 姿态: conf=%.3f kpt_conf=%.3f nms=%.3f model=%dx%d",
+            pose.conf_thres, pose.kpt_conf_thres, pose.nms_thres,
+            pose.model_w, pose.model_h)
+        _check("POSE_CONF_THRES", Config.get("POSE_CONF_THRES"), pose.conf_thres)
+        _check("POSE_KPT_CONF_THRES", Config.get("POSE_KPT_CONF_THRES"), pose.kpt_conf_thres)
+        _check("POSE_NMS_THRES", Config.get("POSE_NMS_THRES"), pose.nms_thres)
+
+        logger.info(
+            "[生效参数] 篮球过滤: max_aspect=%.2f max_w_ratio=%.2f | 姿态crop边距=%d",
+            float(Config.get("BALL_MAX_ASPECT")), float(Config.get("BALL_MAX_W_RATIO")),
+            int(Config.get("POSE_CROP_MARGIN")))
 
     def release_models(self):
         """释放两个 RKNN 实例占用的 NPU 资源（进程退出前调用，避免资源泄漏）。"""
@@ -137,6 +200,8 @@ class VideoAnalyzer:
         """
         self._tracker_off.reset()
         self._tracker_rt.reset()
+        # N3 补偿器三帧窗口也需重置（避免跨视频/会话的残留帧污染）
+        self._kpt_comp.reset()
 
     # ============================================================
     # H265 摄像头录制视频 -> 自动转码为 H264 预处理
@@ -376,7 +441,9 @@ class VideoAnalyzer:
         fps = self._probe_fps(video_path)
         stride = max(1, int(Config.FRAME_STRIDE))
         slow_fps = (fps / stride) * Config.OUT_SLOW_FACTOR
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # N5 改造：改用 FFmpegWriter（subprocess 调 ffmpeg + libx264）
+        codec = getattr(Config, 'FFMPEG_CODEC', 'libx264')
+        bitrate = getattr(Config, 'FFMPEG_BITRATE', '600k')
 
         writers = {}
         for seg in shots:
@@ -387,10 +454,10 @@ class VideoAnalyzer:
             os.makedirs(frames_dir, exist_ok=True)
             out1_path = os.path.join(videos_dir, "clip1_squat.mp4")
             out2_path = os.path.join(videos_dir, "clip2_release.mp4")
-            out1 = cv2.VideoWriter(out1_path, fourcc, slow_fps,
-                                   (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
-            out2 = cv2.VideoWriter(out2_path, fourcc, slow_fps,
-                                   (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
+            out1 = FFmpegWriter(out1_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                                slow_fps, codec=codec, bitrate=bitrate)
+            out2 = FFmpegWriter(out2_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                                slow_fps, codec=codec, bitrate=bitrate)
             writers[shot_id] = (out1, out2, frames_dir)
             seg['clip1_path'] = out1_path
             seg['clip2_path'] = out2_path
@@ -597,11 +664,13 @@ class VideoAnalyzer:
             slow_fps = (fps / stride) * Config.OUT_SLOW_FACTOR
             out1_path = os.path.join(videos_dir, "clip1_squat.mp4")
             out2_path = os.path.join(videos_dir, "clip2_release.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out1 = cv2.VideoWriter(out1_path, fourcc, slow_fps,
-                                   (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
-            out2 = cv2.VideoWriter(out2_path, fourcc, slow_fps,
-                                   (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
+            # N5 改造：改用 FFmpegWriter（subprocess 调 ffmpeg + libx264）
+            codec = getattr(Config, 'FFMPEG_CODEC', 'libx264')
+            bitrate = getattr(Config, 'FFMPEG_BITRATE', '600k')
+            out1 = FFmpegWriter(out1_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                                slow_fps, codec=codec, bitrate=bitrate)
+            out2 = FFmpegWriter(out2_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                                slow_fps, codec=codec, bitrate=bitrate)
 
             curr_idx = 0     # 原始帧序号（用于与 idx_squat 比较、命名图片）
             sampled_idx = 0  # frame_metrics 中的采样序号（隔帧后两者不再相等）
@@ -671,6 +740,9 @@ class VideoAnalyzer:
             fps = getattr(self, 'video_fps', None) or float(Config.get("CAMERA_FPS", 25.0))
             ts = frame_idx / fps if fps > 0 else 0.0
 
+        # N2 埋点（离线链路，PERF_OFFLINE_ENABLED=false 时为空操作）
+        self._pf_offline.begin_frame(frame_idx)
+
         # 工作帧 = 原图（不做竖幅裁剪）
         work = frame
         width = work.shape[1]
@@ -678,6 +750,7 @@ class VideoAnalyzer:
         # 1) 长边 640 + 黑边 -> 640x640 画布（描黑边，等比缩放）
         canvas, scale, dw, dh = letterbox_to_model(
             work, self.det_model.model_w, self.det_model.model_h, pad_color=(0, 0, 0))
+        self._pf_offline.mark("preprocess")
 
         # 2) 目标检测（0=player, 1=basketball），坐标 = 640x640 画布
         dets = self.det_model.detect_on_canvas(canvas)
@@ -690,6 +763,7 @@ class VideoAnalyzer:
             player_box_640, _ = self._tracker_off.update_from_dets(dets, player_cls)
         else:
             player_box_640 = self.selector.select_main_player_box(dets, player_cls)
+        self._pf_offline.mark("detect")
 
         # 640x640 画布坐标 -> 原图坐标（反 letterbox：去黑边 + 反缩放）
         def box_to_orig(b640):
@@ -740,6 +814,7 @@ class VideoAnalyzer:
             np.clip(kpts[visible, 0], 0, width - 1, out=kpts[visible, 0])
             np.clip(kpts[visible, 1], 0, work.shape[0] - 1, out=kpts[visible, 1])
             main_kpts = kpts
+        self._pf_offline.mark("pose")
 
         current_data = {
             'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
@@ -748,9 +823,13 @@ class VideoAnalyzer:
             'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }
 
+        # N3 关键点局部补偿（离线链路）：同实时，原始 kpts 不变，补偿副本送特征提取。
+        comp_kpts = self._kpt_comp.compensate(main_kpts, kpt_conf, frame_idx=frame_idx)
+
         # 区分左右侧并计算关节角度等特征（基于原图坐标，角度/相对值不受缩放影响）
-        pose_feat = extract_pose_features(main_kpts, player_box, kpt_conf)
+        pose_feat = extract_pose_features(comp_kpts, player_box, kpt_conf)
         current_data.update(pose_feat)
+        self._pf_offline.mark("feature")
 
         # 节流诊断：每 30 帧打印一次球/手腕/持球距离，排查「识别不到投篮」
         self._diag_count = getattr(self, "_diag_count", 0) + 1
@@ -782,6 +861,7 @@ class VideoAnalyzer:
         self.last_preview_frame = preview
         self.last_frame_metrics = current_data
 
+        self._pf_offline.end_frame()
         return current_data
 
     def _extract_frame_metrics_norm(self, det360, preview, frame_idx, ts=None):
@@ -807,6 +887,9 @@ class VideoAnalyzer:
             fps = getattr(self, 'video_fps', None) or float(Config.get("CAMERA_FPS", 25.0))
             ts = frame_idx / fps if fps > 0 else 0.0
 
+        # N2 埋点：帧开始（total 计时起点）。空埋点器（PERF_ENABLED=false）时为空操作。
+        self._pf.begin_frame(frame_idx)
+
         pw = int(Config.PREVIEW_WIDTH)
         ph = int(Config.PREVIEW_HEIGHT)
         src_h, src_w = det360.shape[:2]
@@ -817,6 +900,8 @@ class VideoAnalyzer:
         #    - rknn_lite：det360 上下补黑边到 640x640 再 detect_on_canvas，
         #                返回「640x640 画布坐标」，需反算（减 dw/dh）。
         if self.det_engine == "cpp":
+            # cpp 引擎内部自动 letterbox 补边，Python 侧无预处理段（preprocess≈0）
+            self._pf.mark("preprocess")
             dets = self.det_model.detect_360(det360)
             # 640x360 输入图坐标 -> 归一化 -> 预览坐标（无补边，纯等比缩放）
             def to_preview(b):
@@ -829,6 +914,7 @@ class VideoAnalyzer:
             dh = (mh - src_h) // 2        # 上下补边（src_h=360 -> dh=140）
             canvas = cv2.copyMakeBorder(
                 det360, dh, dh, dw, dw, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            self._pf.mark("preprocess")  # 补黑边到 640x640（Python CPU 预处理）
             dets = self.det_model.detect_on_canvas(canvas)
             # 640x640 画布坐标 -> 640x360 坐标 -> 归一化 -> 预览坐标（letterbox 反算）
             def to_preview(b640):
@@ -851,6 +937,8 @@ class VideoAnalyzer:
             player_box_det, _ = self._tracker_rt.update(cands, frame_size=(fw, fh))
         else:
             player_box_det = self.selector.select_main_player_box(dets, player_cls)
+        # N2 埋点：检测段结束（RKNN 推理 + NMS 后处理 + anti-flicker 跟踪选框）
+        self._pf.mark("detect")
 
         # 3) 姿态：从 preview 按 player 框抠 ROI（每边向外扩 margin，防关键点被切掉）-> letterbox 320 -> pose
         poses = []
@@ -920,6 +1008,8 @@ class VideoAnalyzer:
             np.clip(kpts[visible, 0], 0, pw - 1, out=kpts[visible, 0])
             np.clip(kpts[visible, 1], 0, ph - 1, out=kpts[visible, 1])
             main_kpts = kpts
+        # N2 埋点：姿态段结束（抠 ROI + RKNN 姿态推理 + 关键点后处理/坐标映射 + 篮球筛选）
+        self._pf.mark("pose")
 
         current_data = {
             'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
@@ -928,9 +1018,16 @@ class VideoAnalyzer:
             'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }
 
+        # N3 关键点局部补偿：原始 main_kpts 已存入 current_data['kpts']（供 JSON 落盘），
+        # 补偿后的副本仅供给 extract_pose_features + FSM 状态机消费。
+        # 关闭时 compensate() 直接返回原始 kpts 的浅拷贝，开销 ≈ copy。
+        comp_kpts = self._kpt_comp.compensate(main_kpts, kpt_conf, frame_idx=frame_idx)
+
         # 区分左右侧并计算关节角度等特征（基于预览坐标，角度/相对值不受缩放影响）
-        pose_feat = extract_pose_features(main_kpts, player_box, kpt_conf)
+        pose_feat = extract_pose_features(comp_kpts, player_box, kpt_conf)
         current_data.update(pose_feat)
+        # N2 埋点：特征提取段结束（extract_pose_features 关节角度/左右侧）
+        self._pf.mark("feature")
 
         # 保存最新干净帧（1280x720 预览）+ 元数据（坐标与预览一致，供 /frames/raw 下发）
         self.last_preview_frame = preview
@@ -1171,11 +1268,13 @@ class VideoAnalyzer:
 
         out1_path = os.path.join(videos_dir, "clip1_squat.mp4")
         out2_path = os.path.join(videos_dir, "clip2_release.mp4")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out1 = cv2.VideoWriter(out1_path, fourcc, slow_fps,
-                               (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
-        out2 = cv2.VideoWriter(out2_path, fourcc, slow_fps,
-                               (Config.OUT_VIDEO_W, Config.OUT_VIDEO_H))
+        # N5 改造：改用 FFmpegWriter（subprocess 调 ffmpeg + libx264）
+        codec = getattr(Config, 'FFMPEG_CODEC', 'libx264')
+        bitrate = getattr(Config, 'FFMPEG_BITRATE', '600k')
+        out1 = FFmpegWriter(out1_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                            slow_fps, codec=codec, bitrate=bitrate)
+        out2 = FFmpegWriter(out2_path, Config.OUT_VIDEO_W, Config.OUT_VIDEO_H,
+                            slow_fps, codec=codec, bitrate=bitrate)
 
         # 顺序重读整段（不 seek）：RTSP 录制 / 损坏的 H265 视频若 seek 到非关键帧，
         # HEVC 解码器会报 "Could not find ref with POC" 导致花屏甚至打不开；

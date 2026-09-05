@@ -67,8 +67,8 @@ class ApiClient:
             return True, {"raw": resp.content}, ""
         return True, data, ""
 
-    def _post(self, path):
-        ok, data, err = self._request("POST", path)
+    def _post(self, path, **kwargs):
+        ok, data, err = self._request("POST", path, **kwargs)
         if not ok:
             return False, None, err
         code = data.get("code", -1)
@@ -97,8 +97,15 @@ class ApiClient:
         """POST /close 关闭摄像头。"""
         return self._post("/close")
 
-    def start_motion(self):
-        """POST /start 开始运动（录像 + 识别）。"""
+    def start_motion(self, user_id=None):
+        """POST /start 开始运动（录像 + 识别）。
+
+        user_id：可选，用户 ID。会随会话保存到 RK3588 端 save_data 的会话元数据中。
+        """
+        if user_id:
+            user_id = str(user_id).strip()
+            if user_id:
+                return self._post("/start", json={"user_id": user_id})
         return self._post("/start")
 
     def stop_motion(self):

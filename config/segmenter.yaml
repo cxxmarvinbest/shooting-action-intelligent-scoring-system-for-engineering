@@ -21,4 +21,6 @@ KNEE_STAND_MIN: 150.0         # 稳定站立判定阈值（°）
 KNEE_STABLE_FRAMES: 2         # 站立需连续稳定的帧数
 
 # 最短有效动作段长度（采样帧数），过短视为误检丢弃
-MIN_SHOT_FRAMES: 5
+# 5→3：兼容快速连续投篮时第二段在 ring 缓冲中有效帧数偏少的情况
+# （3 帧是 score_one_shot 内部 DTW 最低需求，report.py 校验 len(test_s1)>=2，安全下限）
+MIN_SHOT_FRAMES: 3

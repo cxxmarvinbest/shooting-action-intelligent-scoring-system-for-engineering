@@ -4,7 +4,6 @@
 ========================
 职责：Qt 客户端主界面 —— 装配视频预览（FrameRenderWidget）、控制按钮、
       17 关键点/置信度/角度展示、通道状态（解码/帧率/缓存）、日志面板。
-
 按钮与后端接口对应：
   连接      -> 校验 IP/端口（GET /health）
   打开摄像头 -> POST /open
@@ -12,28 +11,48 @@
   开始运动   -> POST /start
   停止运动   -> POST /stop
   录像       -> POST /record
-  显示单帧   -> GET /frames?n=1&meta=1（含关键点/骨架/肩肘髋膝踝角度）
+  显示单帧   -> GET /frames?n=1&meta=1（弹出独立QDialog弹窗展示帧+关键点/骨架/肩肘髋膝踝角度）
   分析结果   -> GET /result（综合得分/各项得分/AI 评语）
-
 依赖：PyQt6 / http_client / render_widget
 """
-
 import logging
 import time
-
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QColor, QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QLineEdit, QPushButton, QComboBox,
     QCheckBox, QTextEdit, QTableWidget, QTableWidgetItem, QHeaderView,
     QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QSplitter,
-    QMessageBox, QAbstractItemView, QDialog, QSizePolicy)
-
+    QMessageBox, QAbstractItemView, QDialog, QSizePolicy
+)
 from http_client import ApiClient
 from render_widget import (
-    FrameRenderWidget, COLOR_PRESETS, KP_NAMES, KPT_CONF_THRESHOLD)
+    FrameRenderWidget, COLOR_PRESETS, KP_NAMES, KPT_CONF_THRESHOLD
+)
 
 logger = logging.getLogger("qt_client")
+
+
+# ======================【新增：单帧弹窗对话框】======================
+class SingleFrameDialog(QDialog):
+    """独立弹窗：展示抓取的单帧画面，带骨架、检测框、角度元数据。"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("单帧快照预览")
+        self.resize(800, 640)
+        lay = QVBoxLayout(self)
+        # 复用已有的渲染控件 FrameRenderWidget
+        self.render = FrameRenderWidget()
+        lay.addWidget(self.render)
+        # 关闭按钮
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        lay.addWidget(btn_close)
+
+    def set_snapshot(self, qimage: QImage, meta: dict):
+        """设置要显示的快照帧与元数据，弹窗内部直接渲染。"""
+        self.render.set_frame(qimage, meta)
+# =================================================================
 
 
 # ----------------------------------------------------------------------
@@ -41,7 +60,6 @@ logger = logging.getLogger("qt_client")
 # ----------------------------------------------------------------------
 class FramePoller(QThread):
     """后台轮询线程：持续 GET /frames 拉帧 + 周期性 GET /status。"""
-
     frame_ready = pyqtSignal(object, dict)   # (QImage, 完整响应 dict)
     status_ready = pyqtSignal(dict)          # 通道状态 dict
     conn_lost = pyqtSignal(str)              # 连接丢失提示
@@ -99,7 +117,6 @@ class FramePoller(QThread):
 # ----------------------------------------------------------------------
 class ApiTask(QThread):
     """执行一次 HTTP 动作，完成后通过信号回主线程。"""
-
     done = pyqtSignal(str, bool, object)  # (action_name, ok, data_or_err)
 
     def __init__(self, action_name, fn, parent=None):
@@ -120,15 +137,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("投篮动作智能评分 —— Qt 客户端")
         self.resize(1280, 800)
-
         self.client = ApiClient(host, port)
         self._tasks = []  # 持有 ApiTask 引用，防止被 GC
-
         # 关键点表/角度标签更新节流：画面每帧刷新，但表格(17行)每帧 setText 开销大，
         # 改为每 N 帧刷新一次，避免 UI 卡顿。
         self._frame_cnt = 0
         self._kp_update_interval = 5  # 每 5 帧（约 0.25s）刷新一次关键点表/角度
-
         # 后台轮询线程
         self.poller = FramePoller(self.client)
         self.poller.frame_ready.connect(self._on_frame)
@@ -146,10 +160,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-
         # ── 顶部：连接区 ──
         root.addWidget(self._build_connect_group())
-
         # ── 中部：视频预览 + 识别结果 ──
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.render_widget = FrameRenderWidget()
@@ -158,44 +170,42 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         root.addWidget(splitter, 1)
-
         # ── 按钮区 ──
         root.addLayout(self._build_button_row())
-
         # ── 通道状态区 ──
         root.addLayout(self._build_channel_row())
-
         # ── 日志区 ──
         root.addWidget(self._build_log_group())
 
     def _build_connect_group(self):
         group = QGroupBox("连接设置")
         lay = QHBoxLayout(group)
-
         lay.addWidget(QLabel("IP:"))
         self.ip_edit = QLineEdit(self.client.host)
         self.ip_edit.setFixedWidth(140)
         lay.addWidget(self.ip_edit)
-
         lay.addWidget(QLabel("端口:"))
         self.port_edit = QLineEdit(str(self.client.port))
         self.port_edit.setFixedWidth(70)
         lay.addWidget(self.port_edit)
-
         self.btn_connect = QPushButton("连接")
         self.btn_connect.clicked.connect(self.on_connect)
         lay.addWidget(self.btn_connect)
-
         self.conn_status = QLabel("未连接")
         self.conn_status.setStyleSheet("color: #B22222; font-weight: bold;")  # 深红（firebrick）
         lay.addWidget(self.conn_status)
+        # N1：用户 ID 输入框（关联到每次会话，随 save_data 持久化）
+        lay.addWidget(QLabel("用户ID:"))
+        self.user_id_edit = QLineEdit("")
+        self.user_id_edit.setPlaceholderText("默认 0000")
+        self.user_id_edit.setFixedWidth(100)
+        lay.addWidget(self.user_id_edit)
         lay.addStretch(1)
         return group
 
     def _build_result_panel(self):
         panel = QWidget()
         lay = QVBoxLayout(panel)
-
         # 关键点表
         kp_group = QGroupBox("17 个关键点与置信度")
         kp_lay = QVBoxLayout(kp_group)
@@ -212,7 +222,6 @@ class MainWindow(QMainWindow):
         self.kp_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         kp_lay.addWidget(self.kp_table)
         lay.addWidget(kp_group, 1)
-
         # 角度显示
         ang_group = QGroupBox("关节角度（肩/肘/髋/膝/踝）")
         ang_lay = QGridLayout(ang_group)
@@ -225,7 +234,6 @@ class MainWindow(QMainWindow):
             self.angle_labels[key] = lb
             ang_lay.addWidget(lb, idx // 3, idx % 3)
         lay.addWidget(ang_group)
-
         # 显示选项
         opt_group = QGroupBox("显示选项")
         opt_lay = QVBoxLayout(opt_group)
@@ -233,17 +241,14 @@ class MainWindow(QMainWindow):
         self.chk_player_box.setChecked(True)
         self.chk_player_box.stateChanged.connect(self._on_options_changed)
         opt_lay.addWidget(self.chk_player_box)
-
         self.chk_ball_box = QCheckBox("显示篮球框")
         self.chk_ball_box.setChecked(True)
         self.chk_ball_box.stateChanged.connect(self._on_options_changed)
         opt_lay.addWidget(self.chk_ball_box)
-
         self.chk_kpts = QCheckBox("显示姿态点")
         self.chk_kpts.setChecked(True)
         self.chk_kpts.stateChanged.connect(self._on_options_changed)
         opt_lay.addWidget(self.chk_kpts)
-
         color_lay = QHBoxLayout()
         color_lay.addWidget(QLabel("修改颜色:"))
         self.color_combo = QComboBox()
@@ -253,7 +258,6 @@ class MainWindow(QMainWindow):
         color_lay.addWidget(self.color_combo)
         opt_lay.addLayout(color_lay)
         lay.addWidget(opt_group)
-
         return panel
 
     def _build_button_row(self):
@@ -266,16 +270,14 @@ class MainWindow(QMainWindow):
         self.btn_record_stop = QPushButton("停止录像")
         self.btn_single = QPushButton("显示单帧图片")
         self.btn_result = QPushButton("分析结果")
-
         self.btn_open.clicked.connect(lambda: self._run_api("打开摄像头", self.client.open_camera))
         self.btn_close.clicked.connect(lambda: self._run_api("关闭摄像头", self.client.close_camera))
-        self.btn_start.clicked.connect(lambda: self._run_api("开始运动", self.client.start_motion))
+        self.btn_start.clicked.connect(self.on_start_motion)
         self.btn_stop.clicked.connect(lambda: self._run_api("停止运动", self.client.stop_motion))
         self.btn_record.clicked.connect(lambda: self._run_api("开始录像", self.client.record))
         self.btn_record_stop.clicked.connect(lambda: self._run_api("停止录像", self.client.record_stop))
         self.btn_single.clicked.connect(self.on_single_frame)
         self.btn_result.clicked.connect(self.on_result)
-
         for b in (self.btn_open, self.btn_close, self.btn_start, self.btn_stop,
                   self.btn_record, self.btn_record_stop, self.btn_single, self.btn_result):
             lay.addWidget(b)
@@ -347,6 +349,15 @@ class MainWindow(QMainWindow):
         self.log(f"连接丢失：{err}", "ERROR")
 
     # ------------------------------------------------------------------
+    # 开始运动（读取用户 ID 输入框，关联到本次会话）
+    # ------------------------------------------------------------------
+    def on_start_motion(self):
+        user_id = self.user_id_edit.text().strip()
+        self.log(f"开始运动（用户ID: {user_id or '默认 0000'}）...")
+        self._run_api("开始运动",
+                      lambda: self.client.start_motion(user_id or None))
+
+    # ------------------------------------------------------------------
     # 按钮动作（走后台线程，不阻塞 UI）
     # ------------------------------------------------------------------
     def _run_api(self, action_name, fn):
@@ -368,17 +379,22 @@ class MainWindow(QMainWindow):
                 self.log(f"连接失败：{data}", "ERROR")
             return
 
+        # =====================【修改：单帧现在弹出弹窗，不再刷新主预览区】=====================
         if action_name == "显示单帧":
             if ok and isinstance(data, tuple) and len(data) == 2:
                 raw, meta = data
                 qimg = FramePoller._bgr_to_qimage(
                     raw, meta.get("width", 0), meta.get("height", 0))
                 if qimg and not qimg.isNull():
-                    self._on_frame(qimg, meta)
-                    self.log("单帧显示成功（含关键点/骨架/角度）")
+                    # 弹出独立对话框
+                    dlg = SingleFrameDialog(self)
+                    dlg.set_snapshot(qimg, meta)
+                    dlg.exec()
+                    self.log("单帧快照弹窗打开成功（含关键点/骨架/角度）")
                     return
-            self.log(f"显示单帧失败：{data}", "ERROR")
+            self.log(f"获取单帧失败：{data}", "ERROR")
             return
+        # ==================================================================================
 
         if action_name == "分析结果":
             if ok and isinstance(data, dict):
@@ -402,10 +418,8 @@ class MainWindow(QMainWindow):
         shots = data.get("shots") or []
         shot_count = data.get("shot_count", len(shots))
         lines = [f"识别到 {shot_count} 次投篮", ""]
-
         if not shots:
             lines.append("暂无投篮结果（请先开始运动并完成投篮）")
-
         for shot in shots:
             s = shot.get("scores") or {}
             lines.append("=" * 40)
@@ -427,10 +441,8 @@ class MainWindow(QMainWindow):
                         lines.append("  " + ln)
                 else:
                     lines.append("  " + str(ai))
-
         text = "\n".join(lines)
         self.log("分析结果获取成功，详见弹窗")
-
         dlg = QDialog(self)
         dlg.setWindowTitle("投篮分析结果")
         dlg.resize(560, 640)
@@ -450,11 +462,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def on_single_frame(self):
         self.log("正在获取单帧（RK3588 硬解码原始 BGR + 关键点/骨架/角度）...")
-
         def _fetch():
             ok, raw, meta, err = self.client.get_frames_raw()
             return ok, (raw, meta), err
-
         self._run_api("显示单帧", _fetch)
 
     def on_result(self):

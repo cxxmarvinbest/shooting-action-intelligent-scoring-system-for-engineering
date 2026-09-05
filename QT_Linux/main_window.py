@@ -190,6 +190,14 @@ class MainWindow(QMainWindow):
         self.conn_status = QLabel("未连接")
         self.conn_status.setStyleSheet("color: #B22222; font-weight: bold;")  # 深红（firebrick）
         lay.addWidget(self.conn_status)
+
+        # 用户 ID 输入框（关联到每次会话，随 save_data 持久化）
+        lay.addWidget(QLabel("用户ID:"))
+        self.user_id_edit = QLineEdit("")
+        self.user_id_edit.setPlaceholderText("默认 0000")
+        self.user_id_edit.setFixedWidth(100)
+        lay.addWidget(self.user_id_edit)
+
         lay.addStretch(1)
         return group
 
@@ -270,7 +278,7 @@ class MainWindow(QMainWindow):
 
         self.btn_open.clicked.connect(lambda: self._run_api("打开摄像头", self.client.open_camera))
         self.btn_close.clicked.connect(lambda: self._run_api("关闭摄像头", self.client.close_camera))
-        self.btn_start.clicked.connect(lambda: self._run_api("开始运动", self.client.start_motion))
+        self.btn_start.clicked.connect(self.on_start_motion)
         self.btn_stop.clicked.connect(lambda: self._run_api("停止运动", self.client.stop_motion))
         self.btn_record.clicked.connect(lambda: self._run_api("开始录像", self.client.record))
         self.btn_record_stop.clicked.connect(lambda: self._run_api("停止录像", self.client.record_stop))
@@ -346,6 +354,15 @@ class MainWindow(QMainWindow):
         self.conn_status.setText("已断开")
         self.conn_status.setStyleSheet("color: #B22222; font-weight: bold;")  # 深红
         self.log(f"连接丢失：{err}", "ERROR")
+
+    # ------------------------------------------------------------------
+    # 开始运动（读取用户 ID 输入框，关联到本次会话）
+    # ------------------------------------------------------------------
+    def on_start_motion(self):
+        user_id = self.user_id_edit.text().strip()
+        self.log(f"开始运动（用户ID: {user_id or '默认 0000'}）...")
+        self._run_api("开始运动",
+                      lambda: self.client.start_motion(user_id or None))
 
     # ------------------------------------------------------------------
     # 按钮动作（走后台线程，不阻塞 UI）
