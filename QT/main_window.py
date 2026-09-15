@@ -78,10 +78,10 @@ class FramePoller(QThread):
         tick = 0
         while not self._stop:
             if self.polling:
-                # 拉 RK3588 硬解码的原始 BGR 帧，Qt 端用 QImage(Format_BGR888) 重建（不用 OpenCV）
-                ok, raw, meta, err = self.client.get_frames_raw()
-                if ok and raw:
-                    qimg = self._bgr_to_qimage(raw, meta.get("width", 0), meta.get("height", 0))
+                # 拉推理后 JPEG 帧（方案 C：比裸 BGR 降 ~10 倍带宽），Qt 端 QImage.fromData 解码
+                ok, jpeg, meta, err = self.client.get_frames_jpeg()
+                if ok and jpeg:
+                    qimg = self._jpeg_to_qimage(jpeg)
                     if qimg and not qimg.isNull():
                         self.frame_ready.emit(qimg, meta)
                     self._lost_logged = False
@@ -97,7 +97,7 @@ class FramePoller(QThread):
             if tick >= 20:  # 20 * 50ms ≈ 1s
                 tick = 0
                 ok2, sdata, _ = self.client.get_status()
-                if ok2 and sdata.get("code") == 0:
+                if ok2 and sdata.get("code") == 200:
                     self.status_ready.emit(sdata)
             self.msleep(50)
 
@@ -108,6 +108,23 @@ class FramePoller(QThread):
             return None
         try:
             return QImage(raw, w, h, w * 3, QImage.Format.Format_BGR888).copy()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _jpeg_to_qimage(jpeg_bytes):
+        """把 JPEG 编码字节流解码为 QImage（方案 C：替代裸 BGR，降带宽）。
+
+        QImage.fromData 内部解码并自持像素数据（不依赖传入 bytes 生命周期），
+        无需 OpenCV；与 _bgr_to_qimage 不同，无需 width/height 参数。
+        """
+        if not jpeg_bytes:
+            return None
+        try:
+            img = QImage()
+            if img.loadFromData(jpeg_bytes):
+                return img
+            return None
         except Exception:
             return None
 
@@ -270,11 +287,11 @@ class MainWindow(QMainWindow):
         self.btn_record_stop = QPushButton("停止录像")
         self.btn_single = QPushButton("显示单帧图片")
         self.btn_result = QPushButton("分析结果")
-        self.btn_open.clicked.connect(lambda: self._run_api("打开摄像头", self.client.open_camera))
+        self.btn_open.clicked.connect(self.on_open_camera)
         self.btn_close.clicked.connect(lambda: self._run_api("关闭摄像头", self.client.close_camera))
         self.btn_start.clicked.connect(self.on_start_motion)
         self.btn_stop.clicked.connect(lambda: self._run_api("停止运动", self.client.stop_motion))
-        self.btn_record.clicked.connect(lambda: self._run_api("开始录像", self.client.record))
+        self.btn_record.clicked.connect(self.on_record)
         self.btn_record_stop.clicked.connect(lambda: self._run_api("停止录像", self.client.record_stop))
         self.btn_single.clicked.connect(self.on_single_frame)
         self.btn_result.clicked.connect(self.on_result)
@@ -357,6 +374,18 @@ class MainWindow(QMainWindow):
         self._run_api("开始运动",
                       lambda: self.client.start_motion(user_id or None))
 
+    def on_open_camera(self):
+        user_id = self.user_id_edit.text().strip()
+        self.log(f"打开摄像头（用户ID: {user_id or '默认 0000'}）...")
+        self._run_api("打开摄像头",
+                      lambda: self.client.open_camera(user_id or None))
+
+    def on_record(self):
+        user_id = self.user_id_edit.text().strip()
+        self.log(f"开始录像（用户ID: {user_id or '默认 0000'}）...")
+        self._run_api("开始录像",
+                      lambda: self.client.record(user_id or None))
+
     # ------------------------------------------------------------------
     # 按钮动作（走后台线程，不阻塞 UI）
     # ------------------------------------------------------------------
@@ -383,8 +412,7 @@ class MainWindow(QMainWindow):
         if action_name == "显示单帧":
             if ok and isinstance(data, tuple) and len(data) == 2:
                 raw, meta = data
-                qimg = FramePoller._bgr_to_qimage(
-                    raw, meta.get("width", 0), meta.get("height", 0))
+                qimg = FramePoller._jpeg_to_qimage(raw)
                 if qimg and not qimg.isNull():
                     # 弹出独立对话框
                     dlg = SingleFrameDialog(self)
@@ -461,10 +489,10 @@ class MainWindow(QMainWindow):
     # 显示单帧 / 分析结果
     # ------------------------------------------------------------------
     def on_single_frame(self):
-        self.log("正在获取单帧（RK3588 硬解码原始 BGR + 关键点/骨架/角度）...")
+        self.log("正在获取单帧（JPEG + 关键点/骨架/角度）...")
         def _fetch():
-            ok, raw, meta, err = self.client.get_frames_raw()
-            return ok, (raw, meta), err
+            ok, jpeg, meta, err = self.client.get_frames_jpeg()
+            return ok, (jpeg, meta), err
         self._run_api("显示单帧", _fetch)
 
     def on_result(self):

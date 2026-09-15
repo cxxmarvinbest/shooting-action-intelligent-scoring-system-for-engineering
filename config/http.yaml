@@ -1,3 +1,9 @@
 # http.yaml —— HTTP 实时流服务配置（与 APP 通信）
 HTTP_HOST: "192.168.8.249"
 HTTP_PORT: 8899           # 监听端口
+
+# 对外公开的基础 URL（可选）：用于 /media、/result、/sessions 等接口回显
+# 图片/视频的完整可访问地址。留空则用 request.host_url 动态回显（盒子 DHCP
+# 漂移也能自适应）；若 APP 走固定 IP、浏览器走另一 IP（内网穿透/域名映射），
+# 在此填完整前缀（不含末尾斜杠），如 "http://192.168.8.249:8899"。
+HTTP_PUBLIC_BASE_URL: ""

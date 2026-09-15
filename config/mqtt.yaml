@@ -1,0 +1,22 @@
+# mqtt.yaml —— MQTT 实时事件推送配置（连外部 EMQX broker，代码只做 client）
+#
+# 总开关：默认 false（不装配、零影响），需要实时推送时改 true；
+# 也可用环境变量 LQ_MQTT_ENABLED=1 覆盖，免改文件。
+MQTT_ENABLED: true
+
+# ── broker 连接参数 ──
+MQTT_HOST: "192.168.8.249"
+MQTT_PORT: 18883              # TCP 端口（EMQX dashboard 18083 / WS 8083 / WSS 8084 不用）
+MQTT_USERNAME: "admin"
+MQTT_PASSWORD: "mqtt@123"
+MQTT_CLIENT_ID: "basketball_scoring"
+MQTT_KEEPALIVE: 60            # 保活秒数
+
+# ── 发布 / 订阅主题（topic 直接写在 yaml，不做设备号拼接）──
+MQTT_TOPIC_TX: "/SS/BA/DMT/001/AI/TX"   # 上行：板端 -> APP（状态/投篮事件/指令应答）
+MQTT_TOPIC_RX: "/SS/BA/DMT/001/AI/RX"   # 下行：APP -> 板端（start/stop/pause/status/query_shot_detail）
+
+# ── QoS 与自动重连 ──
+MQTT_QOS: 1
+MQTT_RECONNECT_MIN_DELAY: 30   # 重连起始退避（秒）
+MQTT_RECONNECT_MAX_DELAY: 30  # 重连退避上限（秒，指数退避）

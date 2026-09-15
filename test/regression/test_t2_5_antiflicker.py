@@ -50,7 +50,7 @@ if PROJ_ROOT not in sys.path:
 from config import Config
 from vision_algorithm.pipeline.video_analyzer import VideoAnalyzer
 
-DEFAULT_VIDEO = os.path.join(PROJ_ROOT, "test", "left_side_basketball.mp4")
+DEFAULT_VIDEO = os.path.join(PROJ_ROOT, "test", "test_videos", "left_side_basketball.mp4")
 NUM_KPTS = 17
 
 CHAIN_DEFS = {
@@ -165,9 +165,6 @@ def run_level_a(analyzer, args):
             ok, frame = cap.read()
             if not ok:
                 break
-            if frame_idx % stride != 0:
-                frame_idx += 1
-                continue
 
             # 模拟 RGA 两路输出（离线原图 + 实时 640x360/1280x720）
             preview = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LINEAR)

@@ -13,6 +13,7 @@ HTTP 客户端封装（QT/http_client）
 依赖：requests
 """
 
+import base64
 import json
 import logging
 
@@ -25,6 +26,10 @@ class ApiClient:
     """RK3588 算法服务 HTTP 客户端。"""
 
     TIMEOUT = 10.0  # 单次请求超时（秒）；open/close 需等 MPP 解码器清理，适当放宽
+    # 强制直连，绕过 HTTP_PROXY/HTTPS_PROXY 环境变量。
+    # 算法盒子走内网 IP（192.168.8.249），若本机开了代理/科学上网，requests 默认
+    # 会把请求转发给代理导致响应被篡改、code 判空而"连接失败"。
+    NO_PROXY = {"http": None, "https": None}
 
     def __init__(self, host="192.168.8.249", port=8899):
         self.host = host
@@ -48,7 +53,7 @@ class ApiClient:
         url = self.base_url + path
         kwargs.setdefault("timeout", self.TIMEOUT)
         try:
-            resp = requests.request(method, url, **kwargs)
+            resp = requests.request(method, url, proxies=self.NO_PROXY, **kwargs)
         except requests.exceptions.ConnectTimeout:
             return False, None, f"连接超时（{self.TIMEOUT}s）: {url}"
         except requests.exceptions.ConnectionError as e:
@@ -73,7 +78,7 @@ class ApiClient:
             return False, None, err
         code = data.get("code", -1)
         msg = data.get("msg", "")
-        if code != 0:
+        if code != 200:
             return False, data, f"{msg or '未知错误'} (code={code})"
         return True, data, ""
 
@@ -87,10 +92,18 @@ class ApiClient:
         ok, data, err = self._get("/health")
         if not ok:
             return False, None, err
-        return data.get("code") == 0, data, err
+        return data.get("code") == 200, data, err
 
-    def open_camera(self):
-        """POST /open 打开摄像头。"""
+    def open_camera(self, user_id=None):
+        """POST /open 打开摄像头。
+
+        user_id：可选，用户 ID（字符串）。传入时随 /open 一起上报，服务端立即
+                 缓存，使后续「纯录像」产物也能携带正确 user_id。为空时不传。
+        """
+        if user_id:
+            user_id = str(user_id).strip()
+            if user_id:
+                return self._post("/open", json={"user_id": user_id})
         return self._post("/open")
 
     def close_camera(self):
@@ -114,8 +127,16 @@ class ApiClient:
         """POST /stop 停止运动。"""
         return self._post("/stop")
 
-    def record(self):
-        """POST /record 开始录像。"""
+    def record(self, user_id=None):
+        """POST /record 开始录像。
+
+        user_id：可选，用户 ID（字符串）。传入时随 /record 一起上报，覆盖服务端
+                 缓存的 user_id（即使 open 漏传也能在录像这一刻补救）。为空时不传。
+        """
+        if user_id:
+            user_id = str(user_id).strip()
+            if user_id:
+                return self._post("/record", json={"user_id": user_id})
         return self._post("/record")
 
     def record_stop(self):
@@ -179,3 +200,31 @@ class ApiClient:
         meta["width"] = w
         meta["height"] = h
         return True, raw, meta, ""
+
+    def get_frames_jpeg(self):
+        """GET /frames?meta=1：获取推理后 JPEG 帧 + AI 元数据（方案 C，替代裸 BGR 拉流）。
+
+        返回 (ok, jpeg_bytes, meta_dict, err)：
+          - ok=True 时 jpeg_bytes 为 JPEG 编码字节流，meta_dict 含 width/height 及
+            meta(关键点/角度/框)，结构与 get_frames_raw 完全一致，Qt 端用
+            QImage.fromData(jpeg_bytes) 直接解码，无需裸 BGR。
+          - 单帧体积从裸 BGR 的 ~2.76MB（1280×720×3）降到 JPEG 的 ~100–300KB，
+            带宽降一个数量级，缓解轮询卡顿。
+          - ok=False 时 jpeg_bytes=None, meta_dict=None。
+        """
+        ok, data, err = self._get("/frames", params={"n": 1, "meta": 1})
+        if not ok:
+            return False, None, None, err
+        try:
+            frames = data.get("frames") or []
+            if not frames:
+                return False, None, None, "空帧"
+            jpeg = base64.b64decode(frames[0])
+        except (TypeError, ValueError) as e:
+            return False, None, None, f"JPEG base64 解码失败（{e}）"
+        # 重组 meta：结构与 get_frames_raw 对齐（width/height/state/shot_count/meta），
+        # 去掉大体积的 frames base64 字段，避免向渲染层重复传递。
+        meta = dict(data)
+        meta.pop("frames", None)
+        meta.pop("count", None)
+        return True, jpeg, meta, ""

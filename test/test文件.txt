@@ -14,8 +14,8 @@
   预处理方案 A（暴力拉伸）/B（等比+补边）/L（letterbox）精度耗时对比
   python test/regression/ab_compare.py
 --ab_cpp_engine.py
-  cpp 引擎 vs rknn_lite 引擎检测 A/B 对比
-  python test/regression/ab_cpp_engine.py --mode cpp/lite --frames 60
+  cpp 引擎 vs rknn_lite 引擎检测 A/B 对比（对齐报告 3.1，结果落盘 data/output/report_ab_cpp_engine_*.json）
+  python test/regression/ab_cpp_engine.py [--mode cpp|lite|both] [--frames 60] [--video <路径>]
 --test_t2_5_antiflicker.py
   T2 Anti-flicker 跟踪层 ON/OFF A/B 回归
   python test/regression/test_t2_5_antiflicker.py --video test/test_videos/left_rtsp.mp4 --frames 50
@@ -33,15 +33,20 @@
   python test/regression/visualize_det.py --frames 130,180,250
 
 【debug/ 模型/姿态单点排查】
+--pose4out.py
+  pose 4 输出解析工具（outputs[0..2]=3尺度box，outputs[3]=flatten关键点），被下方两脚本复用
 --test_pose_model.py
-  单图姿态估计测试（骨架/关键点可视化）
-  python3 test/debug/test_pose_model.py <图片路径> [--model ...] [--out ...] --crop x1,y1,x2,y2 --conf 0.1 --kpt 0.3
+  姿态模型单图单元测试（4 输出，用 outputs[3] 解析关键点 + 坐标映射回原图 + n/17）
+  ①整图模式 / ②--crop x1,y1,x2,y2 模拟业务 crop-roi 链路
+  python3 test/debug/test_pose_model.py /abs/img.jpg [--crop 100,200,600,900] \
+      [--model /abs/weights/yolov8n-pose.rknn --model-w 224 --model-h 480] [--json data/output]
 --test_pose_kpts_debug.py
-  姿态关键点全 0 根因诊断
-  python3 test/debug/test_pose_kpts_debug.py test.jpg [--model weights/yolov8n-pose.rknn]
+  姿态 4 输出关键点全 0 根因诊断（读 outputs[3] 统计 conf/x/y 范围）
+  python3 test/debug/test_pose_kpts_debug.py /abs/img.jpg [--model ... --model-w 224 --model-h 480]
 --check_rknn_model.py
-  查看 RKNN 模型输入/输出参数
-  python3 test/debug/check_rknn_model.py [模型路径]
+  RKNN 模型信息诊断（对齐报告 2.2：输入/输出维度、张量、量化类型、runtime 版本、是否匹配；
+  自动标注 pose 4 输出的 box 分支 vs flatten 关键点分支）
+  python3 test/debug/check_rknn_model.py [模型路径 ...] [--json <目录|''>]
 
 【unit/ 纯 Python 单元测试】
 --test_single_target_tracker.py

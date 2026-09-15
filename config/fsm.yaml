@@ -40,6 +40,7 @@ FSM:
     cooldown_frames: 20           # 球出手后冷却帧数，防止同一动作重复触发投篮事件
     slope_window: 5               # 斜率（角速度/位移速度）滑动窗口帧数（线性拟合）
     hold_timeout_frames: 90       # 持球后超时未启动 -> 作废回待机
+    hold_keep_frames: 5           # 动作段中持球（HOLD）期最多保留的帧数，更早的持球帧丢弃（防持球过久冗余存图）
     follow_timeout_frames: 40     # 跟随态超时未回待机 -> 强制回待机
     overhead_timeout_frames: 30   # 过顶+出手态超时未判出手 -> 用手过顶帧兜底切段（vis=0 判不出出手也不丢计数）
     detect_lost_reset_frames: 150 # 连续无人且无球帧数阈值 -> 强制回 IDLE（防 OVERHEAD/SQUAT_RAISE 无超时兜底卡死）

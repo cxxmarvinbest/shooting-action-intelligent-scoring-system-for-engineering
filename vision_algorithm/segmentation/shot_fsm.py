@@ -733,6 +733,15 @@ class ShotFSM:
         if not window_before:
             window_before = window
         start_idx = self._find_action_start(window_before)
+        # 方案1：持球（HOLD）期在动作段中最多保留 hold_keep_frames 帧，更早的持球帧丢弃，
+        # 避免持球过久导致动作段（进而小图/骨架图）包含大量冗余静止帧。
+        # 同时以 hold_idx 为下限，防止回溯取到持球之前的杂帧（无下蹲时 _find_action_start
+        # 会兜底返回窗口首帧，可能早于持球起点）。
+        hold_idx = self.state_entries.get('HOLD')
+        squat_idx = self.state_entries.get('SQUAT_RAISE')
+        if hold_idx is not None and squat_idx is not None:
+            keep = int(self.g.get('hold_keep_frames', 5))
+            start_idx = max(start_idx, int(hold_idx), int(squat_idx) - keep)
         start_idx = min(start_idx, release_idx)
         metrics = [m for m in window if start_idx <= m['idx'] <= release_idx]
         if not metrics:

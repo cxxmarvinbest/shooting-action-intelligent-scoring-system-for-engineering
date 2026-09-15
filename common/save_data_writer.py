@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 
@@ -30,6 +31,27 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger("basketball_scoring")
+
+
+# ── JSON 序列化：把「三元素数值数组」压成单行 ──────────────────────────────
+# N7：data.json 的 keypoints p0-p16 单行输出（[x, y, conf]），减少换行、缩小体积；
+# 正则严格限定「正好 3 个数值」的数组，避免误伤 list_pose 等嵌套结构。
+_THREE_NUM_ARRAY_RE = re.compile(
+    r"\[\s*"
+    r"(-?\d+(?:\.\d+)?)\s*,\s*"
+    r"(-?\d+(?:\.\d+)?)\s*,\s*"
+    r"(-?\d+(?:\.\d+)?)\s*"
+    r"\]"
+)
+
+
+def _dumps_compact_json(obj, indent: int = 2) -> str:
+    """json.dumps(indent=indent) 后，把三元素数值数组压成单行。
+
+    例：`[100.0, 200.0, 0.9]`；仅命中「3 个数值」的数组，其它字段原样保留缩进。
+    """
+    text = json.dumps(obj, ensure_ascii=False, indent=indent)
+    return _THREE_NUM_ARRAY_RE.sub(r"[\g<1>, \g<2>, \g<3>]", text)
 
 
 # 默认队列上限：~200 张 jpg，够覆盖一次连续 5 投 × 40 帧 不会满；
@@ -46,7 +68,7 @@ class SaveDataWriter:
     """
 
     # 任务类型
-    KIND_IMAGE = "image"     # (path:str, img:np.ndarray, jpeg_quality:int)
+    KIND_IMAGE = "image"     # (path:str, img:np.ndarray, jpeg_quality:int, optimize:bool)
     KIND_JSON = "json"       # (path:str, data:any)
     KIND_RAW = "raw"         # (path:str, bytes:bytes)
 
@@ -77,7 +99,9 @@ class SaveDataWriter:
     def close(self, timeout: float = 5.0):
         """停止后台线程：排空队列后退出。
 
-        timeout：等待线程退出的最大秒数；超时则放弃剩余任务（只打 warning）。
+        timeout：等待线程退出的最大秒数；超时后对残留任务做「分级兜底」：
+        JSON 任务（data.json 关键数据）由本线程同步写盘保证不丢，图片/raw
+        任务丢弃（可容忍，避免继续阻塞 close 调用方）。
         会话结束（/stop）必须调本接口，否则后台线程会变成"幽灵线程"持续占资源。
         """
         self._stop.set()
@@ -86,26 +110,43 @@ class SaveDataWriter:
         self._thread = None
         if not self._q.empty():
             logger.warning(
-                "SaveDataWriter 关闭时仍有 %d 个任务未落盘（timeout=%.1fs）",
+                "SaveDataWriter 关闭时仍有 %d 个任务未落盘（timeout=%.1fs），"
+                "JSON 类同步兜底写盘，图片/raw 丢弃",
                 self._q.qsize(), timeout)
-            # 排空残留（不写盘，仅清队列，避免继续吃内存）
-            self._drain_queue()
+            # 兜底：JSON（data.json）同步写盘，图片/raw 丢弃（不写盘，仅清队列）
+            self._drain_queue_sync_json()
         logger.info("SaveDataWriter 关闭：成功=%d, 失败=%d, 背压丢=%d",
                     self._done, self._failed, self._dropped)
 
-    def _drain_queue(self):
+    def _drain_queue_sync_json(self):
+        """close 兜底：把队列中残留的 JSON 任务同步写盘（data.json 不能丢），
+        图片/raw 任务直接丢弃（可容忍，避免阻塞 close 调用方）。
+        """
         while not self._q.empty():
             try:
-                self._q.get_nowait()
+                kind, payload = self._q.get_nowait()
             except queue.Empty:
                 break
+            if kind != self.KIND_JSON:
+                continue
+            try:
+                self._dispatch(kind, payload)
+                self._done += 1
+            except Exception as e:
+                self._failed += 1
+                logger.error(
+                    "SaveDataWriter close 兜底写 JSON 失败（%s: %s, path=%s）",
+                    type(e).__name__, e, payload[0] if payload else "?")
 
     # ------------------------------------------------------------------
     # 对外提交（同步入队，非阻塞；队列满则丢最旧）
     # ------------------------------------------------------------------
     def submit_image(self, path: str, img: np.ndarray,
-                     jpeg_quality: int = 90) -> bool:
+                     jpeg_quality: int = 90, optimize: bool = False) -> bool:
         """提交一张图（jpg）异步落盘。
+
+        optimize=True 时启用 JPEG Huffman 优化（IMWRITE_JPEG_OPTIMIZE），
+        体积约再省 5~15%，编码耗时略增。
 
         返回 True=成功入队，False=队列满丢弃（已自增 _dropped 计数）。
         """
@@ -114,7 +155,7 @@ class SaveDataWriter:
             return False
         # 转连续数组（防止上游传非连续 BGR）
         img = np.ascontiguousarray(img)
-        task = (self.KIND_IMAGE, (path, img, int(jpeg_quality)))
+        task = (self.KIND_IMAGE, (path, img, int(jpeg_quality), bool(optimize)))
         return self._enqueue(task)
 
     def submit_json(self, path: str, data) -> bool:
@@ -153,8 +194,15 @@ class SaveDataWriter:
     # 后台写盘线程
     # ------------------------------------------------------------------
     def _run(self):
-        """后台线程主循环：取任务 → 落盘 → 异常仅日志。"""
-        while not self._stop.is_set():
+        """后台线程主循环：取任务 → 落盘 → 异常仅日志。
+
+        收到停止信号（_stop）后，先排空队列再退出，保证 close() 前 submit 的
+        任务（尤其 data.json）都能落盘，避免「关闭时残留任务被丢弃」。
+        """
+        while True:
+            # 停止信号 + 队列已空 → 退出（排空语义，不再立即丢弃残留任务）
+            if self._stop.is_set() and self._q.empty():
+                break
             try:
                 kind, payload = self._q.get(timeout=0.1)
             except queue.Empty:
@@ -171,17 +219,19 @@ class SaveDataWriter:
 
     def _dispatch(self, kind: str, payload):
         if kind == self.KIND_IMAGE:
-            path, img, jpeg_quality = payload
+            path, img, jpeg_quality, optimize = payload
             # cv2.imencode 失败通常意味着「图像损坏 / 编码器异常」，
             # 单独捕获并打 error，区别于通用 Exception。
-            ok, buf = cv2.imencode(
-                ".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+            params = [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)]
+            if optimize:
+                params += [cv2.IMWRITE_JPEG_OPTIMIZE, 1]
+            ok, buf = cv2.imencode(".jpg", img, params)
             if not ok:
                 raise RuntimeError(f"cv2.imencode 失败（path={path}）")
             self._atomic_write_bytes(path, buf.tobytes())
         elif kind == self.KIND_JSON:
             path, data = payload
-            text = json.dumps(data, ensure_ascii=False, indent=2)
+            text = _dumps_compact_json(data)
             self._atomic_write_bytes(path, text.encode("utf-8"))
         elif kind == self.KIND_RAW:
             path, raw = payload

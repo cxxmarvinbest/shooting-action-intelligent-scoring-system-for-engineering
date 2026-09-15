@@ -8,6 +8,7 @@ opencv-python-headless
 requests
 flask
 pyyaml
+paho-mqtt
 
 # RK3588 板端专用（NPU 推理），用官方 whl 安装：
 #   pip3 install rknn_toolkit_lite2-<版本>-cp310-cp310-linux_aarch64.whl

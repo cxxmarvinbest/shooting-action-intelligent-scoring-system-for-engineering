@@ -27,6 +27,7 @@ from controller.standard_lib_manage import StandardLibManage
 from controller.camera_manage import CameraManage
 from controller.inference_manage import InferenceManage
 from controller.http_manage import HttpManage
+from controller.mqtt_manage import MqttManage
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -45,6 +46,14 @@ def main():
         std_lib_mgr.analyzer, std_lib_mgr.std_cache,
         std_lib_mgr.std_video_count, camera)
     http = HttpManage(std_lib_mgr, camera, inference)
+
+    # 2.5 装配 MQTT 事件推送（可选：MQTT_ENABLED=false 时不装配，零影响）
+    mqtt = None
+    if Config.get("MQTT_ENABLED", False):
+        mqtt = MqttManage(command_handler=http.on_mqtt_command)
+        http.set_mqtt(mqtt)
+        inference.set_mqtt(mqtt)
+        mqtt.start()
 
     # 3. 启动 HTTP 服务子线程（对 APP 暴露控制接口）
     http.start()
@@ -73,6 +82,9 @@ def main():
     camera.recording.close()
     logger.info("正在关闭摄像头...")
     camera.close()
+    if mqtt is not None:
+        logger.info("正在停止 MQTT 事件推送...")
+        mqtt.stop()
     logger.info("正在关闭 HTTP 服务...")
     http.stop()
     logger.info("正在释放 RKNN 模型（NPU 资源）...")

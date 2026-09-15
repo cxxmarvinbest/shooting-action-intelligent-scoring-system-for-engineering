@@ -54,7 +54,7 @@ from vision_algorithm.detection.target_selector import TargetSelector
 from vision_algorithm.pose.pose_model import RKNNPoseModel
 from vision_algorithm.pipeline.video_analyzer import VideoAnalyzer
 
-DEFAULT_VIDEO = os.path.join(PROJ_ROOT, "test", "left_side_basketball.mp4")
+DEFAULT_VIDEO = os.path.join(PROJ_ROOT, "test", "test_videos", "left_side_basketball.mp4")
 NUM_KPTS = 17
 
 # 人体尺度分层（box_h 为原图像素，1920x1080 坐标）

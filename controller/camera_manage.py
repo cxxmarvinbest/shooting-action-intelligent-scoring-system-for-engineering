@@ -225,6 +225,16 @@ class CameraManage(ThreadBase):
         with self.lock:
             self.state = state
 
+    def reset_frame_idx(self):
+        """帧号归零（/start 开始时调用，让 fidx 从「开始运动」起算）。
+
+        每轮运动会话（开始运动→停止运动）独立：/start 触发本方法把 latest_idx 归零，
+        解码线程下一帧 +1 后从 1 开始编号，因此投篮小图文件名（如 001-src.jpg）与
+        data.json 的 frame_id 均从 1 起算，与「摄像头打开」解耦。
+        """
+        with self.lock:
+            self.latest_idx = 0
+
     # ------------------------------------------------------------------
     # 状态查询
     # ------------------------------------------------------------------

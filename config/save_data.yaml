@@ -6,15 +6,30 @@
 # ── 投篮逐帧图：player 框外扩 margin（像素），用于裁剪 src/ai 帧图 ──
 # 裁剪范围 = [player_box.x1 - margin, y1 - margin, x2 + margin, y2 + margin]，
 # 再 clip 到原图边界。
-SHOT_CROP_MARGIN: 40
+SHOT_CROP_MARGIN: 20
 
 # ── 投篮逐帧图：JPEG 编码质量（0~100，越高质量越好/体积越大）──
 SHOT_JPEG_QUALITY: 90
+
+# ── 投篮逐帧图：JPEG Huffman 优化开关（true 体积约再省 5~15%，编码耗时略增）──
+SHOT_JPEG_OPTIMIZE: true
 
 # ── data.json 是否写入「每帧 17 点关键点 list_pose」 ──
 # true: 写全量关键点（数据完备，便于复现调试，单投约 40~60 帧 × 17 点 ≈ 1KB）
 # false: 仅写时间/帧号/分数，文件最小（生产环境推荐）
 SHOT_JSON_INCLUDE_POSE: true
+
+# ── 投篮小图序列前后扩帧：向前/向后各多保留的采样帧数 ──
+# 在状态机确定的 [start_idx, release_idx] 基础上，向前多取 prefix 帧（预备动作）、
+# 向后多取 suffix 帧（跟随动作），丰富回放上下文。帧按 FRAME_STRIDE 步进取采样帧。
+CLIP_IMAGE_PREFIX_FRAMES: 3
+CLIP_IMAGE_SUFFIX_FRAMES: 8
+
+# ── 投篮逐帧图帧缓存上限（帧）：_on_shot 落盘时按 frame_idx 回查完整预览帧 ──
+# 只需覆盖「最长投篮段 + CLIP_IMAGE_PREFIX_FRAMES 前扩帧 + 处理滞后余量」。
+# 每帧为完整预览图（1280×720×3 ≈ 2.64MB），默认 128 ≈ 338MB；
+# 调大可覆盖更长的投篮段但内存随之上升，调小省内存但可能丢前扩帧。
+SAVE_FRAME_RING_MAX: 128
 
 # ── 异步写盘队列上限（背压阈值，满则丢最旧任务）──
 SAVE_DATA_QUEUE_SIZE: 256

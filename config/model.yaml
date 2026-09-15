@@ -3,10 +3,10 @@
 # 仅存模型身份 + 硬件/引擎选择；推理阈值已外放到 det.yaml / pose.yaml。
 
 # 检测模型（两类别：0=player 球员，1=basketball 篮球；FP16，静态输入 640x640）
-DET_RKNN_PATH: "weights/best_int8.rknn"
+DET_RKNN_PATH: "weights/player_and_ball_larger.rknn"
 # 姿态模型（yolov8-pose，17 关键点；INT8，静态输入）
 # 注：转换工具要求宽高相同，故导出为 320x320；player 裁剪图以「保持宽高比 + 黑边」letterbox 送入。
-POSE_RKNN_PATH: "weights/yolov8n_pose_int8_320.rknn"
+POSE_RKNN_PATH: "weights/yolov8n_pose_int8_320_new.rknn"
 
 # RK3588 NPU 核心调度模式（默认三核全开，提升检测+姿态并行吞吐）
 # 按位掩码：0=AUTO, 1=CORE0, 2=CORE1, 4=CORE2, 3=CORE0_1, 7=CORE0_1_2

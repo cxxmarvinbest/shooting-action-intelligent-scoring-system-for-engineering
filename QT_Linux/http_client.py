@@ -73,7 +73,7 @@ class ApiClient:
             return False, None, err
         code = data.get("code", -1)
         msg = data.get("msg", "")
-        if code != 0:
+        if code != 200:
             return False, data, f"{msg or '未知错误'} (code={code})"
         return True, data, ""
 
@@ -87,7 +87,7 @@ class ApiClient:
         ok, data, err = self._get("/health")
         if not ok:
             return False, None, err
-        return data.get("code") == 0, data, err
+        return data.get("code") == 200, data, err
 
     def open_camera(self):
         """POST /open 打开摄像头。"""

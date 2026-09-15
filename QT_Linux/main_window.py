@@ -80,7 +80,7 @@ class FramePoller(QThread):
             if tick >= 20:  # 20 * 50ms ≈ 1s
                 tick = 0
                 ok2, sdata, _ = self.client.get_status()
-                if ok2 and sdata.get("code") == 0:
+                if ok2 and sdata.get("code") == 200:
                     self.status_ready.emit(sdata)
             self.msleep(50)
 
