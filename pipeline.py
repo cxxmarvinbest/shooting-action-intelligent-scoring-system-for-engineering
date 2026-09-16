@@ -28,6 +28,7 @@ from controller.camera_manage import CameraManage
 from controller.inference_manage import InferenceManage
 from controller.http_manage import HttpManage
 from controller.mqtt_manage import MqttManage
+from controller.iot_upload_manage import IotUploadManage
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -54,6 +55,12 @@ def main():
         http.set_mqtt(mqtt)
         inference.set_mqtt(mqtt)
         mqtt.start()
+
+    # 2.6 装配后端 IoT 上传（可选：IOT_UPLOAD_ENABLED=false 时不装配，零影响）
+    iot_upload = None
+    if Config.get("IOT_UPLOAD_ENABLED", False):
+        iot_upload = IotUploadManage()
+        http.set_iot_upload(iot_upload)
 
     # 3. 启动 HTTP 服务子线程（对 APP 暴露控制接口）
     http.start()

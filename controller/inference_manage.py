@@ -845,6 +845,18 @@ class InferenceManage(ThreadBase):
             scores["completeness"], scores["coordination"],
             scores["knee_power"], scores["release_angle"])
 
+        # 聚合投篮者 / 篮球平均置信度（供后端上传 player_confidence_avg /
+        # basketball_confidence_avg）。player_conf 由检测链路写入帧元数据；
+        # ball_confs 为每帧有效篮球置信度列表（filter_balls 逐帧产出）。
+        player_confs = [m.get('player_conf') for m in seg['frame_metrics']
+                        if m.get('player_conf') is not None]
+        ball_confs = [c for m in seg['frame_metrics']
+                      for c in (m.get('ball_confs') or [])]
+        player_conf_avg = (round(sum(player_confs) / len(player_confs), 4)
+                           if player_confs else 0.0)
+        ball_conf_avg = (round(sum(ball_confs) / len(ball_confs), 4)
+                         if ball_confs else 0.0)
+
         shot_result = {
             "test_video": "(实时流)",
             "output_dir": Config.SAVE_DATA_ROOT,   # N1 兼容字段
@@ -866,6 +878,8 @@ class InferenceManage(ThreadBase):
             "scores": scores,
             "reports": {k: html_to_text(v[1]) for k, v in reports.items()},
             "ai_report": ai_report,
+            "player_confidence_avg": player_conf_avg,
+            "basketball_confidence_avg": ball_conf_avg,
         }
         return shot_result
 

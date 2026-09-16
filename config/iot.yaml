@@ -1,0 +1,25 @@
+# iot.yaml —— 后端 IoT 上传配置（设备鉴权 + 运动记录上传）
+#
+# 本次只实现「运动记录上传」：运动结束后把主记录 / 投篮明细元数据 / 视频元数据
+# POST 到后端 addAlgorithm 接口。图片/视频二进制上传（upload_exercise_images）暂未实现。
+
+# 总开关：false 时 pipeline 不装配上传模块，零影响（仿 MQTT_ENABLED）
+IOT_UPLOAD_ENABLED: false
+
+# 获取设备令牌接口（application/json）
+IOT_GET_TOKEN_URL: "https://test-sports-iot.siboasi-data.com/iot/acSiteSize/getDeviceToken"
+
+# 运动记录上传接口（application/json）
+IOT_ADD_ALGORITHM_URL: "https://test-sports-iot.siboasi-data.com/iot/pwBasketballRecord/addAlgorithm"
+
+# 固定设备标识码（设备鉴权用）
+IOT_DEVICE_IDENTIFICATION: "DEV-BASKET-20260911-0001"
+
+# 订单 ID（暂写死，后续可改为从 /start 入参透传）
+IOT_ORDER_ID: "ORD-DEFAULT-0001"
+
+# token 提前多久（秒）判定过期、主动重取（留安全余量，避免边界过期导致请求 401）
+IOT_TOKEN_CACHE_ADVANCE: 300
+
+# 单接口超时（秒）
+IOT_UPLOAD_TIMEOUT: 30

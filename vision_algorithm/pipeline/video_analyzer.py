@@ -801,11 +801,13 @@ class VideoAnalyzer:
         # 5) 关键点：pose 裁剪图坐标 -> 原图坐标（加裁剪偏移即可）
         main_kpts = None
         kpt_conf = None
+        player_conf = None
         if poses:
             best = max(poses, key=lambda p: (p['box'][2] - p['box'][0])
                        * (p['box'][3] - p['box'][1]))
             kpts = best['kpts'].copy()          # (17,2) 裁剪图坐标
             kpt_conf = best.get('kpt_conf')
+            player_conf = best.get('conf')
             # 不可见点(0,0)保持 0，只对可见点做坐标映射
             visible = (kpts[:, 0] > 0) | (kpts[:, 1] > 0)
             kpts[visible, 0] += crop_x1
@@ -818,7 +820,7 @@ class VideoAnalyzer:
 
         current_data = {
             'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
-            'kpt_conf': kpt_conf, 'ankle_angle': None,
+            'kpt_conf': kpt_conf, 'player_conf': player_conf, 'ankle_angle': None,
             'cx1': 0, 'cy1': 0, 'player_box': player_box,
             'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }
@@ -996,11 +998,13 @@ class VideoAnalyzer:
         # 4) 关键点：pose 裁剪图坐标 -> 预览坐标（加裁剪偏移 + 越界保护）
         main_kpts = None
         kpt_conf = None
+        player_conf = None
         if poses:
             best = max(poses, key=lambda p: (p['box'][2] - p['box'][0])
                        * (p['box'][3] - p['box'][1]))
             kpts = best['kpts'].copy()          # (17,2) 裁剪图坐标
             kpt_conf = best.get('kpt_conf')
+            player_conf = best.get('conf')
             # 不可见点(0,0)保持 0，只对可见点做坐标映射
             visible = (kpts[:, 0] > 0) | (kpts[:, 1] > 0)
             kpts[visible, 0] += crop_x1
@@ -1013,7 +1017,7 @@ class VideoAnalyzer:
 
         current_data = {
             'idx': frame_idx, 'ts': ts, 'hip_y': None, 'angles': None, 'kpts': main_kpts,
-            'kpt_conf': kpt_conf, 'ankle_angle': None,
+            'kpt_conf': kpt_conf, 'player_conf': player_conf, 'ankle_angle': None,
             'cx1': 0, 'cy1': 0, 'player_box': player_box,
             'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }

@@ -34,6 +34,7 @@ from common.exceptions import (
     HttpApiError, BaseAlgoError, classify_exception)
 from common.save_data_layout import SaveDataLayout
 from vision_algorithm.scoring.scoring_engine import ScoringEngine
+from controller.upload_payload_builder import build_exercise_record_payload
 
 logger = logging.getLogger("basketball_scoring")
 
@@ -55,6 +56,8 @@ class HttpManage(ThreadBase):
         self.session_start_ts = None
         # ── MQTT 客户端引用（未启用时为 None，下行指令桥 on_mqtt_command 判空）──
         self.mqtt = None
+        # ── 后端 IoT 上传客户端引用（未启用时为 None，/stop 上传判空）──
+        self.iot_upload = None
         self.app = Flask(__name__)
         # N1：把 camera 引用注入 recording（ai 视频渲染拉 AI metrics 用）
         try:
@@ -185,6 +188,10 @@ class HttpManage(ThreadBase):
         """注入 MQTT 客户端引用（未启用时为 None）。"""
         self.mqtt = mqtt
 
+    def set_iot_upload(self, iot_upload):
+        """注入后端 IoT 上传客户端引用（未启用时为 None）。"""
+        self.iot_upload = iot_upload
+
     # ------------------------------------------------------------------
     # 运动控制核心动作（HTTP 路由与 MQTT 下行指令共用）
     # ------------------------------------------------------------------
@@ -263,11 +270,42 @@ class HttpManage(ThreadBase):
                          type(e).__name__, e)
         # 4) 会话元数据补记 end_time，标记会话结束
         self._write_session_meta(end_ts=time.time())
+        # 5) 触发后端运动记录上传（IOT_UPLOAD_ENABLED 时装配；失败仅记日志不中断）
+        self._upload_on_stop()
         self.camera.set_state("stopped")
         return {
             "code": 200, "msg": path, "video_path": path,
             "session_dir": self.session_dir,
         }
+
+    def _upload_on_stop(self):
+        """会话结束触发后端运动记录上传。
+
+        组装 payload：session_meta + inference.results（含每投 scores / 置信度）
+        + 每投 data.json 的 list_pose（pose_ext）+ videos 目录元数据。
+        上传失败仅记日志，不影响 /stop 主流程。
+        """
+        iot = self.iot_upload
+        if iot is None or not self.session_dir:
+            return
+        try:
+            session_meta = self._load_session_meta(self.session_dir)
+            payload = build_exercise_record_payload(
+                order_id=Config.get("IOT_ORDER_ID", ""),
+                user_id=self.session_user_id
+                         or session_meta.get("user_id") or "0000",
+                session_meta=session_meta,
+                shots=self.inference.results,
+                images_dir=SaveDataLayout.images_dir(self.session_dir),
+                videos_dir=SaveDataLayout.videos_dir(self.session_dir),
+            )
+            record_id = iot.upload_session(payload)
+            if record_id:
+                logger.info("后端运动记录上传成功: %s", record_id)
+            else:
+                logger.warning("后端运动记录上传失败（详见上方错误日志）")
+        except Exception as e:
+            logger.error("后端运动记录上传异常（%s: %s）", type(e).__name__, e)
 
     # ------------------------------------------------------------------
     # MQTT 下行指令桥（command_handler，跑在 MQTT 网络线程）
