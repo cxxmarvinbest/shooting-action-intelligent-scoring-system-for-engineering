@@ -89,7 +89,7 @@ def build_report_text(result):
 
 
 def score_one_shot(champ1, champ2, avg_std_height, test_s1, test_s2,
-                   test_rel_h, test_metrics, video_fps=30.0):
+                test_rel_h, test_metrics, video_fps=25.0):
     """对单次投篮动作段计算各模块得分并加权叠加，返回 (scores, reports)。
 
     供离线评分与实时评分复用，保证两者评分口径完全一致。

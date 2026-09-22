@@ -36,7 +36,7 @@ import cv2
 from config import Config
 from common.thread_base import ThreadBase
 from common.exceptions import RtspStreamError
-from controller.recording_manage import RecordingManage
+from controller.recording_manage import RecordingManage, WRITE_QUEUE_SIZE
 from vision_algorithm.mpp.mpp_config import USE_MPP_DECODE
 
 logger = logging.getLogger("basketball_scoring")
@@ -70,6 +70,12 @@ class CameraManage(ThreadBase):
 
         # ── 最近一次 AI 推理指标（供 RecordingManage 渲染 ai 视频使用）──
         self._latest_ai_metrics = None
+        # 按帧号索引的 metrics 环形缓存（解决「ai 视频骨架提前于画面」的时间戳错位）：
+        # 采集线程把 (frame, frame_idx) 入 ai 队列，推理线程把 metrics 按 fidx 写入此缓存，
+        # ai 写帧线程按 frame_idx 取出对应 metrics 渲染，保证骨架与画面逐帧对齐。
+        # 容量取 AI 队列上限 + 推理延迟余量，避免越界帧号查不到。
+        self._metrics_cache = {}
+        self._metrics_cache_order = deque(maxlen=WRITE_QUEUE_SIZE + 60)
 
     # ------------------------------------------------------------------
     # 拉流线程（ThreadBase._run）
@@ -167,7 +173,7 @@ class CameraManage(ThreadBase):
                           and self.state in ("recording", "running"))
         # 录像写帧移出锁外：避免编码/拷贝阻塞推理线程取帧（锁竞争导致画面卡住）
         if need_write:
-            self.recording.write(frame)
+            self.recording.write(frame, frame_idx=self.latest_idx)
             # 每 RECORD_ROTATE_SEC 秒自动分段保存（纯录像与运动识别都生效）
             if time.time() - self.recording.record_rotate_ts >= Config.RECORD_ROTATE_SEC:
                 self.recording.rotate()
@@ -195,6 +201,8 @@ class CameraManage(ThreadBase):
             self.last_error = ""
             self.decode_mode = "none"
             self._latest_ai_metrics = None
+            self._metrics_cache.clear()
+            self._metrics_cache_order.clear()
             # 限时等待上一次会话的拉流线程退出（释放 MPP 解码队列），避免阻塞卡死；
             # 旧线程通常数秒内退出，超时则后台继续退出，不阻塞本次打开。
             self.start(join_timeout=OPEN_JOIN_TIMEOUT_SEC)
@@ -218,6 +226,8 @@ class CameraManage(ThreadBase):
             self._fps_window.clear()
             self.decode_mode = "none"
             self._latest_ai_metrics = None
+            self._metrics_cache.clear()
+            self._metrics_cache_order.clear()
         return True, "closed"
 
     def set_state(self, state):
@@ -231,9 +241,12 @@ class CameraManage(ThreadBase):
         每轮运动会话（开始运动→停止运动）独立：/start 触发本方法把 latest_idx 归零，
         解码线程下一帧 +1 后从 1 开始编号，因此投篮小图文件名（如 001-src.jpg）与
         data.json 的 frame_id 均从 1 起算，与「摄像头打开」解耦。
+        同步清空 metrics 缓存，避免上一轮帧号残留命中新帧（帧号已归零会复用旧编号）。
         """
         with self.lock:
             self.latest_idx = 0
+            self._metrics_cache.clear()
+            self._metrics_cache_order.clear()
 
     # ------------------------------------------------------------------
     # 状态查询
@@ -267,10 +280,48 @@ class CameraManage(ThreadBase):
         with self.lock:
             return self._latest_ai_metrics
 
-    def set_ai_metrics(self, metrics):
-        """由 InferenceManage 在每帧推理后回写最新 metrics（原子赋值）。"""
+    def set_ai_metrics(self, metrics, idx=None):
+        """由 InferenceManage 在每帧推理后回写最新 metrics（原子赋值）。
+
+        idx 为该 metrics 对应的帧号；提供时同时写入按帧号索引的缓存，
+        供 ai 写帧线程按帧号取对应 metrics（保证骨架与画面逐帧对齐）。
+        """
         with self.lock:
             self._latest_ai_metrics = metrics
+            if idx is not None:
+                # deque 有 maxlen，append 时自动弹出最旧 idx；
+                # 先判断是否已存在，存在则移到末尾（标记为最新，避免被误弹）
+                if idx in self._metrics_cache:
+                    self._metrics_cache_order.remove(idx)
+                self._metrics_cache_order.append(idx)
+                self._metrics_cache[idx] = metrics
+                # 同步清理已被 deque 弹出的 idx
+                valid = set(self._metrics_cache_order)
+                for stale in list(self._metrics_cache.keys()):
+                    if stale not in valid:
+                        del self._metrics_cache[stale]
+
+    def get_ai_metrics_by_idx(self, idx):
+        """按帧号取对应 metrics（供 ai 写帧线程逐帧对齐用）。
+
+        精确命中返回该帧 metrics；未命中时回退到「不大于 idx 的最近一条」metrics
+        （hold-last：推理帧率低于解码帧率时，用最近一次推理结果连续填充，避免叠加层
+        忽有忽无产生闪烁）。若连此都没有（推理尚未产出），取最小可用帧号兜底，
+        保证叠加层不消失；仅当缓存完全为空才返回 None。
+        """
+        with self.lock:
+            m = self._metrics_cache.get(idx)
+            if m is not None:
+                return m
+            if not self._metrics_cache:
+                return None
+            best_key = None
+            for k in self._metrics_cache:
+                if k <= idx and (best_key is None or k > best_key):
+                    best_key = k
+            if best_key is None:
+                best_key = min(self._metrics_cache)
+            return self._metrics_cache.get(best_key)
 
     def recent_frames(self, n=1):
         """返回最近 n 帧（按时间升序）；n<=0 返回空列表。"""

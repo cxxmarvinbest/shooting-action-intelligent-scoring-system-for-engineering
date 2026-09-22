@@ -19,14 +19,20 @@ from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
 
 from common.exceptions import ScoringError
+from config import Config
+
+
+def _score_param(section, key, default):
+    """从 scoring.yaml 的 SCORE_PARAMS 读取评分参数，缺失时回退默认值。"""
+    return Config.get("SCORE_PARAMS", {}).get(section, {}).get(key, default)
 
 
 class ScoringEngine:
     """评分计算引擎（纯计算，无状态，可独立单元测试）"""
 
     # 动力链同步时间窗口（帧）：相邻关节达峰/启动时差在此窗口内视为同步。
-    # 实测经验值取 2~4 帧，默认 3；可按视频帧率微调。
-    CHAIN_WINDOW_FRAMES = 3
+    # 实测经验值取 2~4 帧，默认 3；现已收敛到 scoring.yaml 的 SCORE_PARAMS.coordination.chain_window。
+    CHAIN_WINDOW_FRAMES = int(_score_param("coordination", "chain_window", 3))
 
     # ============================================================
     # 内部通用工具
@@ -193,23 +199,26 @@ class ScoringEngine:
         hi = float(np.max(seg))
         span = hi - lo
 
-        # 启动时序：以「从极值点变化 20% 幅度」作为开始伸展/释放的标志，
+        # 启动时序：以「从极值点变化 onset_ratio（默认 20%）幅度」作为开始伸展/释放的标志，
         # 避免把追踪噪声当成启动点。
+        onset_ratio = _score_param("coordination", "onset_ratio", 0.2)
         if span < 1e-3:
             onset = bottom
         elif mode == "max":
-            thr = lo + 0.2 * span
+            thr = lo + onset_ratio * span
             cross = np.where(seg >= thr)[0]
             onset = bottom + int(cross[0]) if cross.size else bottom
         else:
-            thr = hi - 0.2 * span
+            thr = hi - onset_ratio * span
             cross = np.where(seg <= thr)[0]
             onset = bottom + int(cross[0]) if cross.size else bottom
 
         # 峰值：平滑后找有效峰（过滤噪声伪峰），取幅度最大者
         sm = ScoringEngine._smooth(signal, 5)
         seg_sm = sm[bottom:]
-        prominence = max(3.0, span * 0.15)
+        prominence = max(
+            _score_param("coordination", "onset_prominence_base", 3.0),
+            span * _score_param("coordination", "onset_prominence_ratio", 0.15))
         if mode == "max":
             peaks = ScoringEngine._find_valid_peaks(
                 seg_sm, min_prominence=prominence, min_distance=window)
@@ -232,7 +241,7 @@ class ScoringEngine:
     # 核心环节技术完整度
     # ============================================================
     @staticmethod
-    def compute_completeness(frame_metrics, fps=30.0):
+    def compute_completeness(frame_metrics, fps=25.0):
         """
         动作完成度专项评估模块
         结合髋关节纵向坐标的[显著下压]判定下蹲蓄力、[反向回弹]判定蹬伸发力；
@@ -265,7 +274,7 @@ class ScoringEngine:
                     and m.get('shoulder_y') is not None):
                 elbow_ang = m['angles'][1]
                 # 肘角为 None（关键点不可见）时不判定出手，避免 None 参与比较抛异常
-                if elbow_ang is not None and m['wrist_y'] < m['shoulder_y'] and elbow_ang > 140:
+                if elbow_ang is not None and m['wrist_y'] < m['shoulder_y'] and elbow_ang > _score_param("completeness", "release_elbow_angle", 140.0):
                     release_idx = i
                     break
         if release_idx is not None:
@@ -288,9 +297,11 @@ class ScoringEngine:
             min_knee_angle = float(np.min(sm_knee)) if len(sm_knee) else 180.0
 
             # -- 🎯 核心判别条件 1：下蹲蓄力环节 --
-            is_coordinate_dropped = drop_ratio > 0.04
-            is_direction_changed = (drop_ratio > 0.02) and (rise_ratio > 0.02)
-            is_angle_flexed = (min_hip_angle < 160.0) or (min_knee_angle < 152.0)
+            is_coordinate_dropped = drop_ratio > _score_param("completeness", "squat_drop_ratio", 0.04)
+            is_direction_changed = (drop_ratio > _score_param("completeness", "squat_direction_drop", 0.02)) and \
+                                   (rise_ratio > _score_param("completeness", "squat_direction_rise", 0.02))
+            is_angle_flexed = (min_hip_angle < _score_param("completeness", "hip_flex_angle", 160.0)) or \
+                              (min_knee_angle < _score_param("completeness", "knee_flex_angle", 152.0))
 
             if is_coordinate_dropped or is_direction_changed or is_angle_flexed:
                 has_squat = True
@@ -304,7 +315,9 @@ class ScoringEngine:
                 # 蹬伸结束膝关节角度：取蹬伸阶段膝关节伸展峰值（有效峰，过滤噪声伪峰），
                 # 向后取少量帧均值作为“蹬伸结束”时的膝关节角度，判断是否充分蹬直。
                 ext_peaks = ScoringEngine._find_valid_peaks(
-                    post_knee, min_prominence=5.0, min_distance=3)
+                    post_knee,
+                    min_prominence=_score_param("completeness", "ext_peak_prominence", 5.0),
+                    min_distance=int(_score_param("completeness", "ext_peak_distance", 3)))
                 if ext_peaks:
                     peak_idx = int(ext_peaks[np.argmax([post_knee[p] for p in ext_peaks])])
                     end_knee_angle = float(np.mean(
@@ -313,16 +326,16 @@ class ScoringEngine:
                     end_knee_angle = max_post_knee
 
                 # 充分蹬直：蹬伸结束时膝关节角度接近伸直（165° 以上，可调）
-                fully_extended = end_knee_angle >= 165.0
+                fully_extended = end_knee_angle >= _score_param("completeness", "full_extend_knee", 165.0)
                 # 蹬伸环节完成 = 存在有效伸展幅度 且 蹬伸结束时膝关节充分蹬直
-                has_extension = (ext_amplitude > 15.0) and fully_extended
+                has_extension = (ext_amplitude > _score_param("completeness", "ext_amplitude_min", 15.0)) and fully_extended
             else:
                 # 膝关节数据不可用时，退化为重心反弹比例判定
-                has_extension = rise_ratio > 0.05
+                has_extension = rise_ratio > _score_param("completeness", "fallback_rise_ratio", 0.05)
         else:
-            if len(knee) and float(np.min(knee)) < 145:
+            if len(knee) and float(np.min(knee)) < _score_param("completeness", "fallback_knee_flex", 145.0):
                 has_squat = True
-            if len(knee) and float(np.max(knee)) - float(np.min(knee)) > 20:
+            if len(knee) and float(np.max(knee)) - float(np.min(knee)) > _score_param("completeness", "fallback_ext_range", 20.0):
                 has_extension = True
 
         # 3. 生成可读性报告
@@ -390,7 +403,7 @@ class ScoringEngine:
     # 屈髋屈膝发力与爆发性
     # ============================================================
     @staticmethod
-    def compute_knee_power(frame_metrics, fps=30.0):
+    def compute_knee_power(frame_metrics, fps=25.0):
         """屈髋屈膝发力与爆发性：综合髋/膝屈曲幅度与蹬伸角速度评估下肢爆发力。
 
         只在下蹲最低点之后的蹬伸阶段评估角速度，并对幅度峰值/角速度峰值做有效性过滤，
@@ -404,9 +417,14 @@ class ScoringEngine:
         bottom = ScoringEngine._find_squat_bottom(frame_metrics)
 
         # (名称, 序列, 理想屈伸幅度°, 理想最大蹬伸角速度°/s)
+        # 理想幅度/角速度已收敛到 scoring.yaml，采用「达到即满分」饱和式打分。
         joints = [
-            ("髋关节(屈髋)", hip, 65.0, 300.0),
-            ("膝关节(屈膝)", knee, 75.0, 350.0),
+            ("髋关节(屈髋)", hip,
+             _score_param("knee_power", "hip_ideal_amp", 70.0),
+             _score_param("knee_power", "hip_ideal_vel", 200.0)),
+            ("膝关节(屈膝)", knee,
+             _score_param("knee_power", "knee_ideal_amp", 80.0),
+             _score_param("knee_power", "knee_ideal_vel", 300.0)),
         ]
 
         html_rows = ""
@@ -419,8 +437,11 @@ class ScoringEngine:
             post = sm[bottom:]
             if len(post) > 0:
                 amp_peaks = ScoringEngine._find_valid_peaks(
-                    post, min_prominence=max(3.0, (float(np.max(post)) - min_angle) * 0.15),
-                    min_distance=3)
+                    post,
+                    min_prominence=max(
+                        _score_param("knee_power", "amp_prominence_base", 3.0),
+                        (float(np.max(post)) - min_angle) * _score_param("knee_power", "amp_prominence_ratio", 0.15)),
+                    min_distance=int(_score_param("knee_power", "peak_min_distance", 3)))
                 if amp_peaks:
                     post_max = float(np.max([post[p] for p in amp_peaks]))
                 else:
@@ -434,16 +455,21 @@ class ScoringEngine:
             vel_ext = np.maximum(vel, 0.0)
             if bottom < len(vel_ext):
                 vel_ext[:bottom] = 0.0
-            vel_sm = ScoringEngine._smooth(vel_ext, 3)
+            vel_sm = ScoringEngine._smooth(vel_ext, int(_score_param("knee_power", "vel_smooth_win", 3)))
             vel_peaks = ScoringEngine._find_valid_peaks(
-                vel_sm, min_prominence=30.0, min_distance=3)
+                vel_sm,
+                min_prominence=_score_param("knee_power", "vel_prominence", 30.0),
+                min_distance=int(_score_param("knee_power", "peak_min_distance", 3)))
             max_vel = float(np.max([vel_sm[p] for p in vel_peaks])) if vel_peaks else 0.0
 
-            amp_score = 100.0 - abs(amplitude - ideal_amp) * 1.5
+            # 幅度分改为饱和式：活动范围达到/超过理想值即满分，不再因蹲太深反向扣分
+            amp_score = (amplitude / ideal_amp) * 100.0
             amp_score = max(0.0, min(100.0, amp_score))
             vel_score = (max_vel / ideal_vel) * 100.0
             vel_score = max(0.0, min(100.0, vel_score))
-            joint_score = amp_score * 0.5 + vel_score * 0.5
+            amp_w = _score_param("knee_power", "amp_weight", 0.5)
+            vel_w = _score_param("knee_power", "vel_weight", 0.5)
+            joint_score = amp_score * amp_w + vel_score * vel_w
             total += joint_score
 
             html_rows += (
@@ -474,7 +500,7 @@ class ScoringEngine:
     # 动力链协同与发力节奏
     # ============================================================
     @staticmethod
-    def compute_coordination(frame_metrics, fps=30.0, window=None):
+    def compute_coordination(frame_metrics, fps=25.0, window=None):
         """动力链协同与发力节奏评估。
 
         发力时序基本固定（近端→远端：髋→膝→肩→肘→腕），因此：
@@ -506,6 +532,10 @@ class ScoringEngine:
             onsets.append(onset)
             peaks.append(peak)
 
+        reverse_pen = _score_param("coordination", "reverse_penalty", 4.0)
+        lag_pen = _score_param("coordination", "lag_penalty", 2.0)
+        onset_w = _score_param("coordination", "onset_penalty_weight", 0.5)
+
         def chain_penalty(seq):
             """按理想顺序（髋→膝→肩→肘→腕）计算时序罚分。"""
             pen = 0.0
@@ -513,13 +543,13 @@ class ScoringEngine:
                 lag = seq[i + 1] - seq[i]
                 if lag < 0:
                     # 顺序颠倒（远端先于近端发力），重罚
-                    pen += abs(lag) * 4.0
+                    pen += abs(lag) * reverse_pen
                 elif lag > window:
                     # 传导过慢（超出 2~4 帧同步窗口），轻罚
-                    pen += (lag - window) * 2.0
+                    pen += (lag - window) * lag_pen
             return pen
 
-        score = 100.0 - chain_penalty(peaks) - chain_penalty(onsets) * 0.5
+        score = 100.0 - chain_penalty(peaks) - chain_penalty(onsets) * onset_w
         score = max(0.0, min(100.0, score))
 
         t_start = min(onsets)
@@ -585,7 +615,7 @@ class ScoringEngine:
         else:
             angle = float(np.degrees(np.arctan2(dy, dx)))
 
-        score = 100.0 - abs(angle - 50.0) * 2.5
+        score = 100.0 - abs(angle - _score_param("release_angle", "ideal_angle", 50.0)) * _score_param("release_angle", "angle_penalty", 2.5)
         score = max(0.0, min(100.0, score))
 
         html_report = f"""
@@ -610,12 +640,15 @@ class ScoringEngine:
     @staticmethod
     def compute_dtw_score(true_avg_degree):
         """将 DTW 平均距离换算为 0~100 分数"""
-        if true_avg_degree <= 10.0:
+        full_deg = _score_param("dtw", "full_score_deg", 10.0)
+        zero_deg = _score_param("dtw", "zero_score_deg", 55.0)
+        min_score = _score_param("dtw", "min_score", 20.0)
+        if true_avg_degree <= full_deg:
             return 100.0
-        elif true_avg_degree >= 55.0:
-            return 20.0
+        elif true_avg_degree >= zero_deg:
+            return min_score
         else:
-            return 100 - (true_avg_degree - 10) * (80 / 45)
+            return 100 - (true_avg_degree - full_deg) * ((100.0 - min_score) / (zero_deg - full_deg))
 
     # ============================================================
     # 标准视频比对：冠军样本选择 + DTW 距离计算
@@ -656,7 +689,7 @@ class ScoringEngine:
     def compute_height_score(test_rel_h, avg_std_height):
         """出手高度评分：测试相对高度与标准参考相对高度的差值映射为分数"""
         height_diff = abs(test_rel_h - avg_std_height)
-        return max(0.0, min(100.0, 100.0 - height_diff * 150.0))
+        return max(0.0, min(100.0, 100.0 - height_diff * _score_param("height", "penalty_per_unit", 150.0)))
 
     # ============================================================
     # 加权叠加

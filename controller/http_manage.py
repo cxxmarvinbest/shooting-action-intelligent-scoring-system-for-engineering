@@ -519,6 +519,13 @@ class HttpManage(ThreadBase):
         def api_stop():
             return jsonify(self._stop_motion_impl())
 
+        @app.route("/reset", methods=["POST"])
+        def api_reset():
+            """POST /reset：投篮计数清零（Qt 端「重置」按钮）。"""
+            self.inference.reset_shot_count()
+            return jsonify({"code": 200, "msg": "reset",
+                            "shot_count": self.inference.shot_count})
+
         @app.route("/status", methods=["GET"])
         def api_status():
             return jsonify({
@@ -548,7 +555,7 @@ class HttpManage(ThreadBase):
                 raise HttpApiError("非法参数: n 取值范围 1~10", errno=400)
             with_meta = request.args.get("meta", "0") in ("1", "true", "True")
 
-            # 附带元数据（Qt 客户端）：下发「预处理后的干净帧(544x960) + AI 元数据」，
+            # 附带元数据（Qt 客户端）：下发「最新预览帧 + AI 元数据」，
             # 关键点/框/角度坐标与该帧坐标系一致，Qt 端可直接叠加绘制。
             if with_meta:
                 preview = self.inference.latest_preview_frame
@@ -1004,9 +1011,22 @@ class HttpManage(ThreadBase):
         return None
 
     def _build_session_summary(self, date_name, name, sess_dir):
-        """组装单个会话摘要：元数据 + 投篮编号列表 + 视频列表。"""
+        """组装单个会话摘要：元数据 + 投篮编号列表 + 视频列表 + 评分聚合。"""
         meta = self._load_session_meta(sess_dir)
         shots = self._scan_session_shots(sess_dir)
+        # 评分聚合：遍历各投篮 data.json，用 combine_scores 重算 final_score
+        # 求 avg/max/min（口径对齐 _mem_result_summary）。data.json 缺失的
+        # 进行中投篮跳过，不按 0 分计入平均，避免拉低 avg_score。
+        finals = []
+        images_dir = SaveDataLayout.images_dir(sess_dir)
+        for sid in shots:
+            data_json = self._load_shot_data_json(os.path.join(images_dir, sid))
+            if not data_json:
+                continue
+            f = self._scores_from_disk_scoring(
+                data_json.get("scoring") or {}).get("final_score")
+            if f is not None:
+                finals.append(float(f))
         return {
             "date": date_name,
             "session_name": name,
@@ -1014,6 +1034,9 @@ class HttpManage(ThreadBase):
             "start_time": meta.get("start_time"),
             "end_time": meta.get("end_time"),
             "shot_count": len(shots),
+            "avg_score": round(sum(finals) / len(finals), 2) if finals else None,
+            "max_score": round(max(finals), 2) if finals else None,
+            "min_score": round(min(finals), 2) if finals else None,
             "shots": [{
                 "shot_id": sid,
                 "detail_url": self._public_base()

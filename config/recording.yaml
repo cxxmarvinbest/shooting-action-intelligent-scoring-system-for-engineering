@@ -18,6 +18,14 @@ RECORD_AI_CLIP: true
 # ai 视频的渲染参数
 RECORD_AI_JPEG_QUALITY: 90      # 渲染时中间帧 JPEG 编码质量
 
+# ── ai 视频文字叠加样式（左上角 shot/score、右上角关节角度）─────
+# 字号 / 描边 / 白底框（透明度与颜色）统一收敛到这里，
+# 供 controller/recording_manage.py 的 _draw_overlay_block 渲染读取。
+RECORD_OVERLAY_FONT_SCALE: 1.0            # 字体缩放（原 0.5，放大一倍 → 1.0）
+RECORD_OVERLAY_THICKNESS: 2               # 文字描边粗细
+RECORD_OVERLAY_BG_ALPHA: 0.30             # 白底框透明度（30%）
+RECORD_OVERLAY_BG_COLOR: [255, 255, 255]  # 白底框颜色（BGR）
+
 # ── N5 改造：视频编码器配置（subprocess ffmpeg + libx264 软件编码）─────
 # 语义说明：FFMPEG_CODEC 是「ffmpeg 编码器名」，不再是 OpenCV 的 FourCC 码。
 # 实现路径：common/ffmpeg_writer.py 用 subprocess 调 ffmpeg，显式传 -c:v。

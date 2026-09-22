@@ -48,6 +48,65 @@ WRITE_QUEUE_SIZE = 30
 # 若 metrics 暂无（推理未跟上），ai 写 raw 副本 + 标记"无 AI 元数据"。
 
 
+def _draw_box(img, x1, y1, x2, y2, color=(255, 255, 255), alpha=0.30):
+    """在 img 上叠加一个半透明实心矩形（文字区块背景）。
+
+    color —— BGR 色值；alpha —— 背景不透明度（0~1）。
+    """
+    overlay = img.copy()
+    cv2.rectangle(overlay, (int(x1), int(y1)), (int(x2), int(y2)), color, -1)
+    cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
+
+
+def _draw_overlay_block(img, rows, font_scale=1.0, thickness=2,
+                        bg_color=(255, 255, 255), bg_alpha=0.30,
+                        x0=0, y0=0, right_align=False, right_x=0,
+                        line_gap=6, margin=6):
+    """绘制一个「半透明白底框 + 多行文字」覆盖层区块。
+
+    rows: [(text, has_deg), ...]
+      text    —— 已格式化的 ASCII 文本（Hershey 不支持中文/Unicode）
+      has_deg —— 文本末尾是否追加一个度符号小圆（右上角角度用）
+    - 左对齐：x0/y0 为区块左上角；右对齐：right_x 为区块右边界，文字右对齐。
+    - 字号/描边/白底框颜色与透明度由 recording.yaml 的 RECORD_OVERLAY_* 控制。
+
+    一个区块只画一个白底框（覆盖该区块所有行），非逐行各自画框。
+    """
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    # 度符号半径随字号缩放（基准 font_scale=0.5 → 半径 2）
+    deg_r = max(2, int(round(2 * font_scale / 0.5)))
+
+    measured = []
+    for text, has_deg in rows:
+        (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        deg_space = (deg_r * 2 + 2) if has_deg else 0
+        measured.append((text, has_deg, tw, th, baseline, deg_space))
+
+    line_h = max(m[3] + m[4] for m in measured) + line_gap
+    block_w = max(m[2] + m[5] for m in measured)          # 文本宽 + 度符号占位
+    block_h = line_h * len(measured) - line_gap
+
+    # 白底框（一个区块一个框）
+    if right_align:
+        x1 = right_x - block_w - margin
+        x2 = right_x + margin
+    else:
+        x1 = x0 - margin
+        x2 = x0 + block_w + margin
+    _draw_box(img, x1, y0 - margin, x2, y0 + block_h + margin, bg_color, bg_alpha)
+
+    # 逐行写文字（首行基线 = y0 + th）
+    for i, (text, has_deg, tw, th, baseline, deg_space) in enumerate(measured):
+        base_y = y0 + th + i * line_h
+        tx = (right_x - tw - deg_space) if right_align else x0
+        cv2.putText(img, text, (int(tx), int(base_y)), font, font_scale,
+                    (255, 255, 255), thickness, cv2.LINE_AA)
+        if has_deg:
+            cx = tx + tw + deg_r + 1
+            cy = base_y - th + deg_r
+            cv2.circle(img, (int(cx), int(cy)), deg_r, (255, 255, 255), -1, cv2.LINE_AA)
+
+
 class RecordingManage:
     """录制器管理（拉流线程异步入队，独立双写帧线程编码落盘）。"""
 
@@ -189,10 +248,12 @@ class RecordingManage:
                         f", ai={self.ai_path}" if self.ai_writer else " (ai 已关闭)")
             return self.raw_writer, self.raw_path, self.ai_writer, self.ai_path
 
-    def write(self, frame):
+    def write(self, frame, frame_idx=None):
         """写一帧（拉流线程调用）：非阻塞入 raw + ai 双队列。
 
         ai 队列只在 RECORD_AI_CLIP=true 时入队；队列满则丢最旧帧。
+        ai 队列存 (frame, frame_idx)：渲染时按 frame_idx 从 CameraManage 取
+        对应 metrics，保证骨架与画面逐帧对齐（避免「骨架提前于动作」的时间戳错位）。
         帧尺寸与 writer 不匹配时告警一次（避免静默写坏帧导致 0 字节视频）。
         """
         if frame is None:
@@ -219,11 +280,11 @@ class RecordingManage:
                 pass
         if self.ai_writer is not None:
             try:
-                self._ai_queue.put_nowait(frame.copy())
+                self._ai_queue.put_nowait((frame.copy(), frame_idx))
             except queue.Full:
                 try:
                     self._ai_queue.get_nowait()
-                    self._ai_queue.put_nowait(frame.copy())
+                    self._ai_queue.put_nowait((frame.copy(), frame_idx))
                 except Exception:
                     pass
 
@@ -251,10 +312,15 @@ class RecordingManage:
                         logger.warning("raw 写帧失败（%s: %s）", type(e).__name__, e)
 
     def _ai_write_loop(self):
-        """ai 写帧线程：取帧 → 拉最新 AI metrics → 渲染骨架/框 → 编码写盘。"""
+        """ai 写帧线程：取帧 → 按帧号取对应 AI metrics → 渲染骨架/框 → 编码写盘。
+
+        帧与 metrics 通过 frame_idx 绑定：采集线程入队时附带帧号，
+        推理线程把 metrics 按帧号存入 CameraManage 缓存，此处按帧号取出
+        对应 metrics 渲染，保证骨架与画面逐帧对齐（不出现「骨架提前于动作」）。
+        """
         while not self._stop.is_set():
             try:
-                frame = self._ai_queue.get(timeout=0.1)
+                frame, frame_idx = self._ai_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             with self._lock:
@@ -262,7 +328,11 @@ class RecordingManage:
             if w is None:
                 continue
             try:
-                drawn = self._render_ai_frame(frame)
+                # 按帧号取对应 metrics；未命中则不传 metrics（仅写 raw 副本）
+                metrics = None
+                if self.camera is not None and frame_idx is not None:
+                    metrics = self.camera.get_ai_metrics_by_idx(frame_idx)
+                drawn = self._render_ai_frame(frame, metrics=metrics)
                 if w.write(drawn):
                     self._ai_written += 1
                 else:
@@ -272,19 +342,18 @@ class RecordingManage:
                 if self._write_fail <= 3:
                     logger.warning("ai 帧渲染/写盘失败: %s", e)
 
-    def _render_ai_frame(self, frame):
-        """把 AI metrics（player_box + kpts）叠加到 frame 上。
+    def _render_ai_frame(self, frame, metrics=None):
+        """把 AI metrics（player_box + kpts + angles + shot/score）叠加到 frame 上。
 
-        metrics 来自 CameraManage.latest_ai_metrics()（camera 引用需在构造时传入）；
-        若 metrics 暂无，返回 frame 副本，保证 ai 视频不中断。
+        - 球员框 / 篮球框 / 17 点 COCO 骨架：原图叠加；
+        - 左上角：第几投（shot）+ 得分（score）；
+        - 右上角：shoulder/elbow/hip/knee 关节角度。
+
+        metrics 由调用方按帧号从 CameraManage 取出（保证与本帧对齐）；
+        若 metrics 为 None（推理未跟上 / 帧号缓存未命中），返回 frame 副本，
+        保证 ai 视频不中断（仅该帧无骨架叠加）。
         """
         drawn = frame.copy()
-        if self.camera is None:
-            return drawn
-        try:
-            metrics = self.camera.latest_ai_metrics()
-        except Exception:
-            return drawn
         if metrics is None:
             return drawn
 
@@ -334,17 +403,61 @@ class RecordingManage:
             except Exception:
                 pass
 
+        # 4) 左上角：第几投（shot 编号，1 起）+ 得分（最近一次投篮综合分）。
+        #    label 用 ASCII（Hershey 不支持中文）：shot=第几投，score=得分。
+        #    shot_idx / final_score 未产出（尚未完成第一投）时显示 '-'。
+        #    字号/描边/白底框透明度与颜色统一由 recording.yaml 的 RECORD_OVERLAY_* 控制。
+        try:
+            font_scale = float(Config.get("RECORD_OVERLAY_FONT_SCALE", 1.0))
+            thickness = int(Config.get("RECORD_OVERLAY_THICKNESS", 2))
+            bg_alpha = float(Config.get("RECORD_OVERLAY_BG_ALPHA", 0.30))
+            bg_color = tuple(Config.get("RECORD_OVERLAY_BG_COLOR", (255, 255, 255)))
+
+            shot_idx = metrics.get("shot_idx")
+            final_score = metrics.get("final_score")
+            left_rows = [
+                (f"shot:{shot_idx if shot_idx is not None else '-'}", False),
+                (f"score: {float(final_score):.1f}"
+                 if final_score is not None else "score: -", False),
+            ]
+            _draw_overlay_block(drawn, left_rows, font_scale, thickness,
+                                bg_color, bg_alpha, x0=6, y0=6)
+
+            # 5) 右上角：shoulder/elbow/hip/knee 关节角度（右对齐，缺失 "-"）
+            angles = metrics.get("angles")
+            right_rows = []
+            for i, name in enumerate(("shoulder", "elbow", "hip", "knee")):
+                val = angles[i] if (angles is not None and i < len(angles)) else None
+                right_rows.append(
+                    (f"{name} {float(val):.1f}", True) if val is not None
+                    else (f"{name} -", False))
+            right_x = drawn.shape[1] - 6
+            _draw_overlay_block(drawn, right_rows, font_scale, thickness,
+                                bg_color, bg_alpha,
+                                right_align=True, right_x=right_x, y0=6)
+        except Exception:
+            pass
+
         return drawn
 
     def _drain_queue(self, q, writer):
-        """把队列中剩余帧写入 writer，返回实际写入帧数。"""
+        """把队列中剩余帧写入 writer，返回实际写入帧数。
+
+        raw 队列元素是 ndarray 帧；ai 队列元素是 (frame, frame_idx) 元组，
+        此处取出 frame 部分直接写（rotate/close 时不再做渲染对齐，仅落盘）。
+        """
         n = 0
         while not q.empty():
             try:
-                frame = q.get_nowait()
+                item = q.get_nowait()
             except queue.Empty:
                 break
-            if writer is not None:
+            # ai 队列元素为 (frame, frame_idx) 元组，raw 队列为 ndarray
+            if isinstance(item, tuple):
+                frame = item[0]
+            else:
+                frame = item
+            if writer is not None and frame is not None:
                 try:
                     writer.write(frame)
                     n += 1

@@ -2,13 +2,12 @@
 """
 视频分析编排层（pipeline）
 ===========================
-职责：串联「描黑边预处理 → 目标检测/跟踪 → 姿态估计 → 特征提取 → 动作分段 → 可视化」，
+职责：串联「目标检测/跟踪 → 姿态估计 → 特征提取 → 动作分段 → 可视化」，
       产出评分模块所需的 frame_metrics 与角度序列。
 
 对外暴露：VideoAnalyzer
 
 模块划分（本层为编排层，不承载具体算法）：
-  - vision_algorithm.preprocess.letterbox.LetterboxPreprocessor  描黑边（1920x1080 -> 544x960）
   - vision_algorithm.detection.det_model.RKNNDetModel            篮球检测（单类别）
   - vision_algorithm.detection.target_selector.TargetSelector    主球员筛选（姿态框）+ 篮球过滤
   - vision_algorithm.pose.pose_model.RKNNPoseModel               人体姿态估计（自带人体框）
@@ -268,7 +267,7 @@ class VideoAnalyzer:
     # ============================================================
     @staticmethod
     def _probe_fps(video_path):
-        """用 ffprobe 探测视频平均帧率，失败返回 30.0。"""
+        """用 ffprobe 探测视频平均帧率，失败返回 25.0。"""
         try:
             out = subprocess.run(
                 [FFPROBE_BIN, "-v", "error", "-select_streams", "v:0",
@@ -282,7 +281,7 @@ class VideoAnalyzer:
                     return float(num) / float(den)
         except Exception:
             pass
-        return 30.0
+        return 25.0
 
     def _iter_mpp_frames(self, video_path):
         """用 MPP 硬解 H265 本地视频，逐帧 yield (frame_idx, frame)。
@@ -607,7 +606,7 @@ class VideoAnalyzer:
             self._cleanup_temp(work_path, is_temp)
             return None, None, None, None, None, None
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         stride = max(1, int(Config.FRAME_STRIDE))
         # 隔帧采样后，相邻采样帧的时间间隔变为 stride/fps 秒；
         # 评分里的时长、角速度都基于帧数×fps 计算，因此把有效帧率设为 fps/stride，保证口径不变。
@@ -1022,10 +1021,12 @@ class VideoAnalyzer:
             'ball_boxes': ball_boxes, 'ball_confs': ball_confs
         }
 
-        # N3 关键点局部补偿：原始 main_kpts 已存入 current_data['kpts']（供 JSON 落盘），
-        # 补偿后的副本仅供给 extract_pose_features + FSM 状态机消费。
+        # N3 关键点局部补偿：原始 main_kpts 已存入 current_data['kpts']（供 JSON 落盘，
+        # 保持原始不变）；补偿后的副本同时供 extract_pose_features + FSM 消费，并存入
+        # kpts_draw 供 AI 视频渲染骨架时使用，避免渲染未补偿的抖动点。
         # 关闭时 compensate() 直接返回原始 kpts 的浅拷贝，开销 ≈ copy。
         comp_kpts = self._kpt_comp.compensate(main_kpts, kpt_conf, frame_idx=frame_idx)
+        current_data['kpts_draw'] = comp_kpts
 
         # 区分左右侧并计算关节角度等特征（基于预览坐标，角度/相对值不受缩放影响）
         pose_feat = extract_pose_features(comp_kpts, player_box, kpt_conf)
@@ -1255,7 +1256,7 @@ class VideoAnalyzer:
         if not cap.isOpened():
             return None, None
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         stride = max(1, int(Config.FRAME_STRIDE))
         slow_fps = (fps / stride) * Config.OUT_SLOW_FACTOR
 
@@ -1340,7 +1341,7 @@ class VideoAnalyzer:
             self._cleanup_temp(work_path, is_temp)
             return []
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         stride = max(1, int(Config.FRAME_STRIDE))
         self.current_fps = fps / stride
         self.video_fps = fps

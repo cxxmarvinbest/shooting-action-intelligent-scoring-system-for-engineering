@@ -167,6 +167,11 @@ class InferenceManage(ThreadBase):
         self.results = []       # 本次运动识别出的投篮结果（供 /result 查询）
         self.status_msg = ""    # 当前状态提示文案（供 /status 查询）
 
+        # ── 最近一次投篮的落盘编号 + 综合分（供 ai 视频左上角渲染「第几投/得分」）──
+        # _on_shot 评分落盘成功后更新；_run 透传给 camera.set_ai_metrics。
+        self.latest_shot_idx = None
+        self.latest_final_score = None
+
         # ── MQTT 事件推送（未装配时为 None，_publish_shot_done 判空跳过）──
         self.mqtt = None
         # ── 当前会话 user_id（/start 时由 http 协调层注入，投篮事件携带）──
@@ -223,6 +228,9 @@ class InferenceManage(ThreadBase):
         self.last_status_ts = 0.0
         self.results = []
         self.status_msg = ""
+        # 最近一次投篮的落盘编号/综合分归零（新会话从头计）
+        self.latest_shot_idx = None
+        self.latest_final_score = None
         # 帧号基准归零：让投篮小图文件名 / data.json 的 frame_id 从「开始运动」起算，
         # 而非「摄像头打开」起算。必须放在 _frame_ring.clear() 之前——解码线程异步
         # 每帧 latest_idx += 1（在 self.lock 内），先归零可保证「归零之后才可能进新帧」，
@@ -243,6 +251,24 @@ class InferenceManage(ThreadBase):
     def set_recognition_active(self, active):
         """开启/关闭识别（不停止推理线程，仍持续提供预览帧给 Qt 客户端）。"""
         self.recognition_active = bool(active)
+
+    def reset_shot_count(self):
+        """把投篮计数与分析结果清零（/reset 接口调用，供 Qt 端「重置」按钮）。
+
+        清空计数器与 results（供 /result 查询的分析结果），不停止录像，
+        便于连续多组投篮重新开始。同时复位切分状态机（回 IDLE）并清零其
+        shot_count，使后续投篮从第 1 投重新编号；latest_shot_idx /
+        latest_final_score 归零后 AI 视频左上角 shot/score 回到 '-'。
+        """
+        self.shot_count = 0
+        self.results = []
+        self.latest_shot_idx = None
+        self.latest_final_score = None
+        if self.segmenter is not None:
+            # reset() 只清 FSM 帧级状态（回 IDLE），不清 shot_count，需单独清零
+            self.segmenter.reset()
+            self.segmenter.shot_count = 0
+        logger.info("投篮计数与分析结果已清零")
 
     def set_mqtt(self, mqtt):
         """注入 MQTT 客户端（未启用时为 None，_publish_shot_done 判空跳过）。"""
@@ -323,15 +349,19 @@ class InferenceManage(ThreadBase):
             except Exception as e:
                 logger.warning("pending 补写异常（%s: %s），跳过", type(e).__name__, e)
 
-            # 回写 AI metrics 给 CameraManage，供 RecordingManage 的 ai 渲染拉取
+            # 回写 AI metrics 给 CameraManage，供 RecordingManage 的 ai 渲染拉取。
+            # 传入 fidx 作为 metrics 的帧号，CameraManage 按帧号缓存，ai 写帧线程
+            # 按帧号取出对应 metrics 渲染，保证骨架与画面逐帧对齐。
             try:
                 self.camera.set_ai_metrics({
                     "player_box": fd.get("player_box"),
                     "ball_boxes": fd.get("ball_boxes") or [],
-                    "kpts": fd.get("kpts"),
+                    "kpts": fd.get("kpts_draw", fd.get("kpts")),
                     "side_str": fd.get("side_str"),
                     "angles": fd.get("angles"),
-                })
+                    "shot_idx": self.latest_shot_idx,
+                    "final_score": self.latest_final_score,
+                }, idx=fidx)
             except Exception as e:
                 logger.debug("回写 AI metrics 失败: %s", e)
 
@@ -805,6 +835,10 @@ class InferenceManage(ThreadBase):
             # N1：投篮逐帧图 + data.json 异步落盘
             shot_dir, shot_idx = self._save_shot_segment(
                 seg, shot["scores"], shot.get("ai_report"))
+            # 记录最近一次投篮的编号/综合分，供 ai 视频左上角渲染「第几投/得分」
+            if shot_idx is not None:
+                self.latest_shot_idx = shot_idx
+                self.latest_final_score = shot["scores"].get("final_score")
             if shot_dir is not None:
                 # 补一个 session-relative 路径给前端（与 save_data 根相对）
                 shot["save_data"] = {
@@ -832,7 +866,7 @@ class InferenceManage(ThreadBase):
         """对实时切出的一段投篮做评分，写 JSON + 文本报告，返回 shot_result。"""
         seq1, seq2, rel_height, idx_squat = self.analyzer._split_and_height(
             seg['frame_metrics'])
-        video_fps = getattr(self.analyzer, 'current_fps', 30.0)
+        video_fps = getattr(self.analyzer, 'current_fps', 25.0)
         scores, reports = score_one_shot(
             self.std_cache['champ1'], self.std_cache['champ2'],
             self.std_cache['avg_std_height'],

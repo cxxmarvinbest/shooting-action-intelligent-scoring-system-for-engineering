@@ -72,19 +72,19 @@ pyinstaller --noconfirm --clean --windowed --name BasketballQtClient --collect-a
 
 ```
 响应头：
-  X-Frame-Width: 544
-  X-Frame-Height: 960
+  X-Frame-Width: 1280
+  X-Frame-Height: 720
   X-Frame-Meta: {"state":"running","shot_count":3,
                  "meta":{"player_box":[...],"ball_boxes":[...],
                          "kpts":[[x,y,conf],...],
                          "angles":{"shoulder":..,"elbow":..,"hip":..,"knee":..,"ankle":..},
                          "side":"Right"}}
 响应体：
-  <544 x 960 x 3 的原始 BGR 字节流>
+  <预览帧宽 x 预览帧高 x 3 的原始 BGR 字节流>
 ```
 
 > Qt 端用 `QImage(raw, w, h, w*3, QImage.Format.Format_BGR888)` 直接重建，全程不经过
-> OpenCV 的 JPEG 编码/解码。关键点 / 框 / 角度坐标均在 **预处理后 544x960 帧** 坐标系内，
+> OpenCV 的 JPEG 编码/解码。关键点 / 框 / 角度坐标均在 **预览帧** 坐标系内，
 > Qt 端直接叠加绘制，无需坐标反算。骨架连线与算法端 `SKELETON_CONNECTIONS`（COCO）一致。
 
 ## 注意事项

@@ -12,6 +12,9 @@ FFmpegWriter —— 基于 subprocess 调 ffmpeg 的 H.264 软件编码写入器
 接口对齐 cv2.VideoWriter 的最小集：write(frame) / isOpened() / release()，
 调用方只需把构造那一行换掉即可 drop-in 替换。
 
+RK3588板端预装 ffmpeg与libx264
+    sudo apt install -y ffmpeg libx264-dev
+
 命令示例：
     ffmpeg -y -f rawvideo -pix_fmt bgr24 -s 1280x720 -r 25 -i - \
            -an -c:v libx264 -preset veryfast \

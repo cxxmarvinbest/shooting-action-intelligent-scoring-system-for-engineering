@@ -7,7 +7,7 @@
 # 也可用环境变量 LQ_COMPENSATE=1 临时开启，无需改文件。
 
 # 补偿总开关（false = 返回原始 kpts 副本，开销 ≈ copy）
-COMPENSATE_ENABLED: false
+COMPENSATE_ENABLED: true
 
 # ── 阈值参数（像素 / 置信度）──
 

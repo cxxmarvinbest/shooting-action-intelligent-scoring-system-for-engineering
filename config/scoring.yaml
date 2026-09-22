@@ -14,3 +14,63 @@ SCORE_WEIGHTS:
 
 # 阶段1/阶段2 分数中 DTW 自身占比，剩余由其它模块加权均分补足
 PHASE_DTW_RATIO: 0.7
+
+# ───────────────────────────────────────────────────────────────
+# 评分算法可调参数（scoring_engine.py 运行时读取，改完重启生效）
+# 组织方式：SCORE_PARAMS.<模块>.<参数>；缺失的键会回退到代码默认值。
+# ───────────────────────────────────────────────────────────────
+SCORE_PARAMS:
+  # 屈髋屈膝发力与爆发性（compute_knee_power）
+  knee_power:
+    hip_ideal_amp: 60.0          # 理想屈髋活动范围（°），达到/超过即幅度满分
+    hip_ideal_vel: 200.0         # 理想屈髋蹬伸角速度（°/s），达到/超过即角速度满分
+    knee_ideal_amp: 60.0         # 理想屈膝活动范围（°）
+    knee_ideal_vel: 300.0        # 理想屈膝蹬伸角速度（°/s）
+    amp_weight: 0.5              # 单关节得分中「幅度分」权重
+    vel_weight: 0.5              # 单关节得分中「角速度分」权重
+    amp_prominence_base: 3.0     # 幅度峰值最小突出度（°）
+    amp_prominence_ratio: 0.15   # 幅度峰值突出度比例（× 活动范围）
+    vel_prominence: 30.0         # 角速度峰值最小突出度（°/s）
+    vel_smooth_win: 3            # 角速度平滑窗口（帧）
+    peak_min_distance: 3         # 峰值最小间距（帧）
+
+  # 核心环节技术完整度（compute_completeness）
+  completeness:
+    release_elbow_angle: 140.0   # 出手释放：肘角 > 该值判伸直推球（°）
+    squat_drop_ratio: 0.04       # 下蹲蓄力：髋部重心下压比例（相对身高）
+    squat_direction_drop: 0.02   # 下蹲蓄力：方向改变判定的下压比例
+    squat_direction_rise: 0.02   # 下蹲蓄力：方向改变判定的回弹比例
+    hip_flex_angle: 160.0        # 下蹲蓄力：髋关节屈曲角度阈值（< 该值，°）
+    knee_flex_angle: 152.0       # 下蹲蓄力：膝关节屈曲角度阈值（< 该值，°）
+    full_extend_knee: 165.0      # 蹬伸充分蹬直：蹬伸结束膝角 >= 该值（°）
+    ext_amplitude_min: 15.0      # 蹬伸有效：蹬伸活动范围 > 该值（°）
+    fallback_rise_ratio: 0.05    # 膝数据缺失时退化的重心回弹比例
+    fallback_knee_flex: 145.0    # 帧数不足时下蹲蓄力膝角阈值（°）
+    fallback_ext_range: 20.0     # 帧数不足时蹬伸活动范围阈值（°）
+    ext_peak_prominence: 5.0     # 蹬伸峰值过滤最小突出度（°）
+    ext_peak_distance: 3         # 蹬伸峰值最小间距（帧）
+
+  # 动力链协同与发力节奏（compute_coordination / _extension_onset_peak）
+  coordination:
+    chain_window: 3              # 相邻关节达峰/启动同步窗口（帧）
+    reverse_penalty: 4.0         # 顺序颠倒罚分系数（每帧）
+    lag_penalty: 2.0             # 传导过慢罚分系数（每超出 1 帧）
+    onset_penalty_weight: 0.5    # 启动时序罚分相对峰值罚分的权重
+    onset_ratio: 0.2             # 启动判定：从极值点变化该比例记为启动
+    onset_prominence_base: 3.0   # 启动/峰值检测最小突出度（°）
+    onset_prominence_ratio: 0.15 # 启动/峰值检测突出度比例（× 活动范围）
+
+  # 出手角度（compute_release_angle）
+  release_angle:
+    ideal_angle: 50.0            # 理想出手小臂对地夹角（°）
+    angle_penalty: 2.5           # 每偏离理想角 1° 扣分
+
+  # DTW 距离换算（compute_dtw_score）
+  dtw:
+    full_score_deg: 10.0         # 平均距离 <= 该值给满分 100
+    zero_score_deg: 55.0         # 平均距离 >= 该值给最低分
+    min_score: 20.0              # DTW 最低分
+
+  # 出手高度（compute_height_score）
+  height:
+    penalty_per_unit: 150.0      # 每单位高度差扣分

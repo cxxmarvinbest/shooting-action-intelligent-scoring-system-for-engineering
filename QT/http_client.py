@@ -143,6 +143,10 @@ class ApiClient:
         """POST /record/stop 停止录像并保存。"""
         return self._post("/record/stop")
 
+    def reset(self):
+        """POST /reset 投篮计数清零。"""
+        return self._post("/reset")
+
     def pause(self):
         """POST /pause 暂停。"""
         return self._post("/pause")

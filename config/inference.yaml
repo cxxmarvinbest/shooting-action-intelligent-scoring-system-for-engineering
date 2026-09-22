@@ -1,10 +1,4 @@
-# inference.yaml —— 推理与预处理参数
-# 目标尺寸：与标准视频一致（宽 x 高）
-TARGET_W: 544
-TARGET_H: 960
-
-# 描灰边裁剪窗口横向中心偏移（像素，相对画面中心，正值向右）
-CROP_X_OFFSET: 0
+# inference.yaml —— 推理参数
 
 # 采样步长（1 = 每帧采样，实时性最高；2/3 = 隔帧采样降负载）
 FRAME_STRIDE: 1

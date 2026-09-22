@@ -6,10 +6,10 @@
 # ── 投篮逐帧图：player 框外扩 margin（像素），用于裁剪 src/ai 帧图 ──
 # 裁剪范围 = [player_box.x1 - margin, y1 - margin, x2 + margin, y2 + margin]，
 # 再 clip 到原图边界。
-SHOT_CROP_MARGIN: 20
+SHOT_CROP_MARGIN: 40
 
 # ── 投篮逐帧图：JPEG 编码质量（0~100，越高质量越好/体积越大）──
-SHOT_JPEG_QUALITY: 90
+SHOT_JPEG_QUALITY: 60
 
 # ── 投篮逐帧图：JPEG Huffman 优化开关（true 体积约再省 5~15%，编码耗时略增）──
 SHOT_JPEG_OPTIMIZE: true

@@ -287,6 +287,7 @@ class MainWindow(QMainWindow):
         self.btn_record_stop = QPushButton("停止录像")
         self.btn_single = QPushButton("显示单帧图片")
         self.btn_result = QPushButton("分析结果")
+        self.btn_reset = QPushButton("重置")
         self.btn_open.clicked.connect(self.on_open_camera)
         self.btn_close.clicked.connect(lambda: self._run_api("关闭摄像头", self.client.close_camera))
         self.btn_start.clicked.connect(self.on_start_motion)
@@ -295,8 +296,10 @@ class MainWindow(QMainWindow):
         self.btn_record_stop.clicked.connect(lambda: self._run_api("停止录像", self.client.record_stop))
         self.btn_single.clicked.connect(self.on_single_frame)
         self.btn_result.clicked.connect(self.on_result)
+        self.btn_reset.clicked.connect(lambda: self._run_api("重置", self.client.reset))
         for b in (self.btn_open, self.btn_close, self.btn_start, self.btn_stop,
-                  self.btn_record, self.btn_record_stop, self.btn_single, self.btn_result):
+                  self.btn_record, self.btn_record_stop, self.btn_single,
+                  self.btn_result, self.btn_reset):
             lay.addWidget(b)
         lay.addStretch(1)
         return lay
@@ -430,6 +433,10 @@ class MainWindow(QMainWindow):
             else:
                 self.log(f"获取分析结果失败：{data}", "ERROR")
             return
+
+        if action_name == "重置" and ok:
+            self.lbl_shot.setText("投篮数: 0")
+            self.log("投篮计数已清零")
 
         if action_name == "打开摄像头" and ok:
             self.poller.polling = True
